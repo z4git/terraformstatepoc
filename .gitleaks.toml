@@ -1,0 +1,20 @@
+# gitleaks configuration. Used by the mirror workflow's history scan, which gates every push to the
+# public repo, and picked up automatically by a local `gitleaks git .` from the repository root.
+
+title = "ALZTFPoC"
+
+[extend]
+useDefault = true
+
+# gitleaks' sourcegraph-access-token rule matches any bare 40-character hex string whose entropy
+# clears a threshold. A git SHA has that exact shape, so SHA-pinned actions -- the supply-chain
+# practice GitHub recommends, and what every `uses:` in .github/ follows -- trip the rule. Whether a
+# given pin trips it depends on the entropy of that particular SHA, so without this the scan fails
+# at random whenever a pin is bumped.
+#
+# Scoped to the `uses: owner/repo@<sha>` shape rather than disabling the rule, so a real Sourcegraph
+# token (sgp_-prefixed, or a bare hex one anywhere else) is still caught.
+[[allowlists]]
+description = "SHA-pinned GitHub Actions are version pins, not secrets"
+regexTarget = "line"
+regexes = ['''uses:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[a-f0-9]{40}\b''']

@@ -1,0 +1,165 @@
+name: Checkov scan
+description: >
+  Runs Checkov (policy-as-code) over the Terraform and Bicep sources and fails the job on any failed check.
+  Needs no Azure login, so callers can run it before signing in.
+
+# Usage (same call in tfstate-infrastructure-plan.yml and tfstate-infrastructure-deploy.yml):
+#
+#   - uses: ./.github/actions/checkov-scan
+#     with:
+#       directory: infrastructure
+#
+# Suppress a single finding where the resource is defined, never here:
+#
+#   resource "azurerm_storage_account" "tfstate" {
+#     #checkov:skip=CKV_AZURE_59:reason the posture is accepted
+#
+#   resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+#     //checkov:skip=CKV_AZURE_59:reason the posture is accepted
+#
+# Suppressions show up as "Skipped checks" in the run summary, so they stay visible in review.
+# skip-checks exists for a check that is wrong everywhere (e.g. a broken new check in a Checkov release);
+# prefer the inline form, which keeps the justification next to the code it applies to.
+
+inputs:
+  directory:
+    description: Directory to scan, relative to the repository root
+    required: false
+    default: infrastructure
+  frameworks:
+    description: Space-separated Checkov frameworks to run
+    required: false
+    default: terraform bicep
+  checkov-version:
+    description: Checkov version to install. Pinned so a new release cannot fail an unrelated pull request.
+    required: false
+    default: 3.3.17
+  python-version:
+    description: Python version used to install Checkov
+    required: false
+    default: "3.12"
+  skip-checks:
+    description: Comma-separated check IDs to skip repository-wide. Prefer inline checkov:skip comments.
+    required: false
+    default: ""
+  config-file:
+    description: Path to a .checkov.yml config file. Empty = none.
+    required: false
+    default: ""
+  soft-fail:
+    description: true reports findings as warnings instead of failing the job
+    required: false
+    default: "false"
+
+outputs:
+  passed-checks:
+    description: Number of passed checks across all frameworks
+    value: ${{ steps.run.outputs.passed-checks }}
+  failed-checks:
+    description: Number of failed checks across all frameworks
+    value: ${{ steps.run.outputs.failed-checks }}
+  skipped-checks:
+    description: Number of checks suppressed by checkov:skip comments or skip-checks
+    value: ${{ steps.run.outputs.skipped-checks }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      if: ${{ !env.ACT }}
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Python (act images do not always include it)
+      if: ${{ env.ACT }}
+      shell: bash
+      run: |
+        SUDO=$(command -v sudo || true)
+        if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
+          $SUDO apt-get update && $SUDO apt-get install -y python3 python3-venv
+        fi
+        python3 --version
+
+    - id: run
+      shell: bash
+      env:
+        DIRECTORY: ${{ inputs.directory }}
+        FRAMEWORKS: ${{ inputs.frameworks }}
+        CHECKOV_VERSION: ${{ inputs.checkov-version }}
+        SKIP_CHECKS: ${{ inputs.skip-checks }}
+        CONFIG_FILE: ${{ inputs.config-file }}
+        SOFT_FAIL: ${{ inputs.soft-fail }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -d "$DIRECTORY" ]; then
+          echo "::error::Scan directory '$DIRECTORY' does not exist."
+          exit 1
+        fi
+
+        # A venv keeps the install off the runner's system Python (PEP 668) without --break-system-packages.
+        venv="$RUNNER_TEMP/checkov-venv"
+        python3 -m venv "$venv"
+        "$venv/bin/pip" install --quiet --disable-pip-version-check "checkov==$CHECKOV_VERSION"
+        "$venv/bin/checkov" --version
+
+        # --download-external-modules false: every module here is local, so the scan needs no network.
+        args=(--directory "$DIRECTORY" --compact --quiet --download-external-modules false)
+        # Unquoted on purpose: "terraform bicep" has to become two --framework values.
+        args+=(--framework $FRAMEWORKS)
+        if [ -n "$SKIP_CHECKS" ]; then
+          args+=(--skip-check "$SKIP_CHECKS")
+        fi
+        if [ -n "$CONFIG_FILE" ]; then
+          args+=(--config-file "$CONFIG_FILE")
+        fi
+        if [ "$SOFT_FAIL" = "true" ]; then
+          args+=(--soft-fail)
+        fi
+
+        output="$RUNNER_TEMP/checkov-output.txt"
+        set +e
+        # ANSI_COLORS_DISABLED: colour escapes would show up as literal junk in the job summary.
+        # PYTHONHASHSEED: Checkov resolves a Bicep module parameter by iterating a set, so with the default
+        # random hash seed the same commit can pass one run and fail the next (seen with CKV_AZURE_206 on
+        # modules/storage.bicep). A fixed seed makes the verdict depend on the sources alone.
+        ANSI_COLORS_DISABLED=1 PYTHONHASHSEED=0 "$venv/bin/checkov" "${args[@]}" | tee "$output"
+        rc=${PIPESTATUS[0]}
+        set -e
+
+        # One "Passed checks: .., Failed checks: .., Skipped checks: .." line per framework; sum them.
+        read -r passed failed skipped < <(
+          awk -F'[:,]' '/^Passed checks:/ { p += $2; f += $4; s += $6 } END { print p+0, f+0, s+0 }' "$output"
+        )
+        {
+          echo "passed-checks=$passed"
+          echo "failed-checks=$failed"
+          echo "skipped-checks=$skipped"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### Checkov ($FRAMEWORKS) in \`$DIRECTORY\`"
+          echo ""
+          echo "$passed passed, $failed failed, $skipped skipped (Checkov $CHECKOV_VERSION)"
+          if [ "$failed" -gt 0 ]; then
+            echo ""
+            echo "<details><summary>Failed checks</summary>"
+            echo ""
+            echo '```'
+            cat "$output"
+            echo '```'
+            echo ""
+            echo "</details>"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$failed" -gt 0 ] && [ "$SOFT_FAIL" = "true" ]; then
+          echo "::warning::Checkov found $failed failed check(s); soft-fail is enabled so the job continues."
+        elif [ "$failed" -gt 0 ]; then
+          echo "::error::Checkov found $failed failed check(s). Fix them, or suppress one with a checkov:skip comment that states why."
+        elif [ "$rc" -ne 0 ]; then
+          # No findings but a non-zero exit: Checkov itself failed (bad arguments, parse error, crash).
+          echo "::error::Checkov exited $rc without reporting findings; see the step log."
+        fi
+        exit "$rc"

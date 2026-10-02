@@ -1,0 +1,103 @@
+name: EPAC setup
+description: >
+  Installs the Enterprise Policy as Code (EPAC) PowerShell module and the Az modules it needs, all pinned to a
+  version, plus PowerShell itself when running under act. Needs no Azure login. Run it before azure/login with
+  enable-AzPSSession, which imports the Az.Accounts module this action installs.
+
+# Usage (same call in policies-plan.yml and policies-deploy.yml):
+#
+#   - uses: ./.github/actions/epac-setup
+#
+# Bumping EPAC: change epac-version below (the PowerShell Gallery has no Dependabot ecosystem), run the plan
+# workflow on the pull request and read the release notes at
+# https://github.com/Azure/enterprise-azure-policy-as-code/releases. The Az module pins only need to move
+# when a new EPAC release requires them.
+
+inputs:
+  epac-version:
+    description: EnterprisePolicyAsCode module version. Pinned so a new release cannot change a plan or fail an unrelated pull request.
+    required: false
+    default: 11.5.6
+  az-accounts-version:
+    description: Az.Accounts module version (Connect-AzAccount, Invoke-AzRestMethod).
+    required: false
+    default: 5.5.3
+  az-resources-version:
+    description: Az.Resources module version (policy and role assignment cmdlets).
+    required: false
+    default: 10.2.1
+  az-resourcegraph-version:
+    description: Az.ResourceGraph module version (EPAC lists resource groups through Resource Graph).
+    required: false
+    default: 1.3.0
+
+runs:
+  using: composite
+  steps:
+    - name: Install PowerShell (act images do not include it)
+      if: ${{ env.ACT }}
+      shell: bash
+      run: |
+        SUDO=$(command -v sudo || true)
+        if ! command -v pwsh >/dev/null 2>&1; then
+          . /etc/os-release
+          curl -sSL -o "$RUNNER_TEMP/packages-microsoft-prod.deb" \
+            "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb"
+          $SUDO dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
+          $SUDO apt-get update && $SUDO apt-get install -y powershell
+        fi
+        pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+    # The four modules take about a minute to install; the cache key changes only when a pin changes.
+    - name: Cache PowerShell modules
+      if: ${{ !env.ACT }}
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.local/share/powershell/Modules
+        key: psmodules-${{ runner.os }}-epac${{ inputs.epac-version }}-azaccounts${{ inputs.az-accounts-version }}-azresources${{ inputs.az-resources-version }}-azresourcegraph${{ inputs.az-resourcegraph-version }}
+
+    - name: Install EPAC and Az modules
+      shell: pwsh
+      env:
+        EPAC_VERSION: ${{ inputs.epac-version }}
+        AZ_ACCOUNTS_VERSION: ${{ inputs.az-accounts-version }}
+        AZ_RESOURCES_VERSION: ${{ inputs.az-resources-version }}
+        AZ_RESOURCEGRAPH_VERSION: ${{ inputs.az-resourcegraph-version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # Order matters: Az.Accounts is the dependency of the other two. Dependency resolution is skipped so
+        # the gallery cannot pull in a second, unpinned Az.Accounts next to the one installed here.
+        $modules = @(
+          @{ Name = 'Az.Accounts';            Version = $env:AZ_ACCOUNTS_VERSION },
+          @{ Name = 'Az.Resources';           Version = $env:AZ_RESOURCES_VERSION },
+          @{ Name = 'Az.ResourceGraph';       Version = $env:AZ_RESOURCEGRAPH_VERSION },
+          @{ Name = 'EnterprisePolicyAsCode'; Version = $env:EPAC_VERSION }
+        )
+        foreach ($module in $modules) {
+          $installed = Get-Module -ListAvailable -Name $module.Name | Where-Object { $_.Version -eq [version]$module.Version }
+          if ($installed) {
+            Write-Host "$($module.Name) $($module.Version) is already installed (cache)."
+            continue
+          }
+          Write-Host "Installing $($module.Name) $($module.Version) from the PowerShell Gallery."
+          # "[x.y.z]" is NuGet range syntax for exactly that version.
+          Install-PSResource -Name $module.Name -Version "[$($module.Version)]" -Repository PSGallery `
+            -TrustRepository -Scope CurrentUser -SkipDependencyCheck -Quiet
+        }
+
+        # Fails here, before any Azure login, if a module is broken or a pin does not exist.
+        Import-Module Az.Accounts -RequiredVersion $env:AZ_ACCOUNTS_VERSION
+        Import-Module EnterprisePolicyAsCode -RequiredVersion $env:EPAC_VERSION
+        $loaded = foreach ($module in $modules) {
+          Get-Module -ListAvailable -Name $module.Name | Where-Object { $_.Version -eq [version]$module.Version } |
+            Select-Object -First 1 -Property Name, Version
+        }
+        $loaded | Format-Table -AutoSize | Out-String | Write-Host
+        @(
+          '### EPAC tooling'
+          ''
+          '| Module | Version |'
+          '|---|---|'
+          ($loaded | ForEach-Object { "| $($_.Name) | $($_.Version) |" })
+          ''
+        ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append

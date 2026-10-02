@@ -1,0 +1,61 @@
+{
+  "name": "Claude Code",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "TZ": "${localEnv:TZ:Etc/UTC}",
+      "NODE_VERSION": "22",
+      "CLAUDE_CODE_VERSION": "latest",
+      "TERRAFORM_VERSION": "latest"
+    }
+  },
+
+  "runArgs": [
+    // Required by init-firewall.sh. Drop these two (and the postStartCommand
+    // below) if you don't want the egress firewall.
+    "--cap-add=NET_ADMIN",
+    "--cap-add=NET_RAW"
+  ],
+
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "workspaceFolder": "/workspace",
+
+  // Named volumes so the login from `claude`'s first run, and shell history,
+  // survive "Rebuild Container".
+  "mounts": [
+    "source=claude-code-config-${devcontainerId},target=/home/node/.claude,type=volume",
+    "source=claude-code-history-${devcontainerId},target=/commandhistory,type=volume"
+  ],
+
+  "remoteUser": "node",
+
+  // No credentials here on purpose: you log in interactively on the first
+  // `claude` run and the config volume above keeps you logged in. Don't add a
+  // "${localEnv:ANTHROPIC_API_KEY}"-style entry — remoteEnv is applied to every
+  // process VS Code starts, and an unset host variable becomes an empty
+  // credential that takes precedence over the stored login and 401s.
+  "remoteEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/node/.claude",
+    "NODE_OPTIONS": "--max-old-space-size=4096"
+  },
+
+  // Re-applied on every container start: iptables rules live in the network
+  // namespace and are lost when the container stops.
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "eamodio.gitlens",
+        "hashicorp.terraform"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "zsh": { "path": "/bin/zsh" }
+        }
+      }
+    }
+  }
+}

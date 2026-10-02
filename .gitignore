@@ -1,0 +1,29 @@
+# Terraform state and working directory
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Local Terraform inputs (contain environment details); the .example files are committed
+*.tfvars
+!*.tfvars.example
+*.tfbackend
+!*.tfbackend.example
+
+# Saved plans contain state values, including secrets
+*.tfplan
+
+# Terraform crash logs
+crash.log
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Enterprise Policy as Code plans written by Build-DeploymentPlans when run by hand (policies/README.md)
+Output/
+
+# Local working notes. Deliberately untracked: TODO.md records which controls are not yet in place,
+# which is a punch list internally and a roadmap in the public mirror.
+TODO.md
+
+# macOS directory metadata
+.DS_Store

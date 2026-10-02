@@ -1,0 +1,585 @@
+{
+  // Bundles every hardening policy for the resource types the allow-list permits into one policy set
+  // (initiative), so a single assignment (policyAssignments/tfstate-hardening.jsonc) carries the whole
+  // baseline and each policy's effect can still be set per environment. Every effect defaults to Deny.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-set-definition-schema.json",
+  "name": "tfstate-infrastructure-hardening",
+  "properties": {
+    "displayName": "Terraform state infrastructure hardening baseline",
+    "description": "Deny-by-default configuration baseline for the resource types the Terraform state infrastructure uses: storage accounts, blob services and containers, Log Analytics, action groups, log search alert rules, diagnostic settings, backup vaults, role assignments, and tags and locations on every resource and resource group.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Security"
+    },
+    "parameters": {
+      "storageSecureTransferEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage accounts must require HTTPS and a minimum TLS version: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedMinimumTlsVersions": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed minimum TLS versions"
+        },
+        "defaultValue": [
+          "TLS1_2",
+          "TLS1_3"
+        ]
+      },
+      "storageNoSharedKeyEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage accounts must disable shared key access: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "storageNoPublicBlobAccessEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage accounts must disallow anonymous public blob access: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "storageNoCrossTenantReplicationEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage accounts must not allow cross-tenant object replication: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "storageEntraIdDefaultsEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage accounts must default to Entra ID authorization and restrict copy scope: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "storageNetworkDefaultDenyEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage accounts must deny network access by default: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "storageKindAndSkuEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage accounts must be StorageV2 with an allowed SKU: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedStorageSkus": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed storage account SKUs"
+        },
+        "defaultValue": [
+          "Standard_GZRS",
+          "Standard_RAGZRS"
+        ]
+      },
+      "storageBlobDataProtectionEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Storage blob services must enable versioning, change feed, soft delete and point-in-time restore: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "minimumSoftDeleteRetentionDays": {
+        "type": "Integer",
+        "metadata": {
+          "displayName": "Minimum blob and container soft delete retention (days)"
+        },
+        "defaultValue": 90
+      },
+      "logAnalyticsRetentionEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Log Analytics workspaces must retain data for a minimum number of days: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "minimumLogAnalyticsRetentionInDays": {
+        "type": "Integer",
+        "metadata": {
+          "displayName": "Minimum Log Analytics retention (days)"
+        },
+        "defaultValue": 30
+      },
+      "actionGroupEmailOnlyEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Action groups must only notify by email using the common alert schema: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "alertRuleEnabledEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Log search alert rules must be enabled: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "diagnosticSettingLogAnalyticsOnlyEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Diagnostic settings must send to a Log Analytics workspace and nowhere else: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "backupVaultSoftDeleteEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Backup vaults must keep soft delete enabled: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "roleAssignmentAllowedRolesEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Role assignments may only grant the roles the Terraform state infrastructure uses: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedRoleDefinitionIds": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed role definition GUIDs"
+        },
+        "defaultValue": [
+          "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+          "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1",
+          "17d1049b-9a84-46fb-8f53-869881c3d3ab",
+          "f58310d9-a9f6-439a-9e8d-f62e7b41a168",
+          "e5e2a7ff-d759-4cd2-bb51-3152d37e2eb1",
+          "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+          "8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
+          "b24988ac-6180-42a0-ab88-20f7382dd24c",
+          "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+        ]
+      },
+      "requiredTagsResourcesEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Resources must carry the required tags: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "requiredTagsResourceGroupsEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Resource groups must carry the required tags: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedLocationsResourcesEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Resources must be deployed to an allowed location: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedLocationsResourceGroupsEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Resource groups must be created in an allowed location: effect"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedLocations": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed locations",
+          "strongType": "location"
+        },
+        "defaultValue": [
+          "westeurope"
+        ]
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionReferenceId": "storageSecureTransfer",
+        "policyDefinitionName": "tfstate-storage-secure-transfer",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageSecureTransferEffect')]"
+          },
+          "allowedMinimumTlsVersions": {
+            "value": "[parameters('allowedMinimumTlsVersions')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "storageNoSharedKey",
+        "policyDefinitionName": "tfstate-storage-no-shared-key",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageNoSharedKeyEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "storageNoPublicBlobAccess",
+        "policyDefinitionName": "tfstate-storage-no-public-blob-access",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageNoPublicBlobAccessEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "storageNoCrossTenantReplication",
+        "policyDefinitionName": "tfstate-storage-no-cross-tenant-replication",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageNoCrossTenantReplicationEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "storageEntraIdDefaults",
+        "policyDefinitionName": "tfstate-storage-entra-id-defaults",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageEntraIdDefaultsEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "storageNetworkDefaultDeny",
+        "policyDefinitionName": "tfstate-storage-network-default-deny",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageNetworkDefaultDenyEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "storageKindAndSku",
+        "policyDefinitionName": "tfstate-storage-kind-and-sku",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageKindAndSkuEffect')]"
+          },
+          "allowedSkus": {
+            "value": "[parameters('allowedStorageSkus')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "storageBlobDataProtection",
+        "policyDefinitionName": "tfstate-storage-blob-data-protection",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('storageBlobDataProtectionEffect')]"
+          },
+          "minimumSoftDeleteRetentionDays": {
+            "value": "[parameters('minimumSoftDeleteRetentionDays')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "logAnalyticsRetention",
+        "policyDefinitionName": "tfstate-log-analytics-retention",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('logAnalyticsRetentionEffect')]"
+          },
+          "minimumRetentionInDays": {
+            "value": "[parameters('minimumLogAnalyticsRetentionInDays')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "actionGroupEmailOnly",
+        "policyDefinitionName": "tfstate-action-group-email-only",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('actionGroupEmailOnlyEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "alertRuleEnabled",
+        "policyDefinitionName": "tfstate-alert-rule-enabled",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('alertRuleEnabledEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "diagnosticSettingLogAnalyticsOnly",
+        "policyDefinitionName": "tfstate-diagnostic-setting-log-analytics-only",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('diagnosticSettingLogAnalyticsOnlyEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "backupVaultSoftDelete",
+        "policyDefinitionName": "tfstate-backup-vault-soft-delete",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('backupVaultSoftDeleteEffect')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "roleAssignmentAllowedRoles",
+        "policyDefinitionName": "tfstate-role-assignment-allowed-roles",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('roleAssignmentAllowedRolesEffect')]"
+          },
+          "allowedRoleDefinitionIds": {
+            "value": "[parameters('allowedRoleDefinitionIds')]"
+          }
+        }
+      },
+      // One reference per required tag: a policy rule cannot loop over a list of tag names (the 'field'
+      // accessor takes parameters() only). The list matches locals.tags in bicep/main.bicep and
+      // terraform/main.tf; adding a tag there means adding a reference in each block below.
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourcesApplication",
+        "policyDefinitionName": "tfstate-required-tags-resources",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourcesEffect')]"
+          },
+          "tagName": {
+            "value": "application"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourcesEnvironment",
+        "policyDefinitionName": "tfstate-required-tags-resources",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourcesEffect')]"
+          },
+          "tagName": {
+            "value": "environment"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourcesEnvironmentNumber",
+        "policyDefinitionName": "tfstate-required-tags-resources",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourcesEffect')]"
+          },
+          "tagName": {
+            "value": "environmentNumber"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourcesWorkload",
+        "policyDefinitionName": "tfstate-required-tags-resources",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourcesEffect')]"
+          },
+          "tagName": {
+            "value": "workload"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourcesManagedBy",
+        "policyDefinitionName": "tfstate-required-tags-resources",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourcesEffect')]"
+          },
+          "tagName": {
+            "value": "managedBy"
+          }
+        }
+      },
+      // Same tags on the resource group itself.
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourceGroupsApplication",
+        "policyDefinitionName": "tfstate-required-tags-resource-groups",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourceGroupsEffect')]"
+          },
+          "tagName": {
+            "value": "application"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourceGroupsEnvironment",
+        "policyDefinitionName": "tfstate-required-tags-resource-groups",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourceGroupsEffect')]"
+          },
+          "tagName": {
+            "value": "environment"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourceGroupsEnvironmentNumber",
+        "policyDefinitionName": "tfstate-required-tags-resource-groups",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourceGroupsEffect')]"
+          },
+          "tagName": {
+            "value": "environmentNumber"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourceGroupsWorkload",
+        "policyDefinitionName": "tfstate-required-tags-resource-groups",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourceGroupsEffect')]"
+          },
+          "tagName": {
+            "value": "workload"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "requiredTagsResourceGroupsManagedBy",
+        "policyDefinitionName": "tfstate-required-tags-resource-groups",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('requiredTagsResourceGroupsEffect')]"
+          },
+          "tagName": {
+            "value": "managedBy"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "allowedLocationsResources",
+        "policyDefinitionName": "tfstate-allowed-locations-resources",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('allowedLocationsResourcesEffect')]"
+          },
+          "allowedLocations": {
+            "value": "[parameters('allowedLocations')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "allowedLocationsResourceGroups",
+        "policyDefinitionName": "tfstate-allowed-locations-resource-groups",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('allowedLocationsResourceGroupsEffect')]"
+          },
+          "allowedLocations": {
+            "value": "[parameters('allowedLocations')]"
+          }
+        }
+      }
+    ]
+  }
+}

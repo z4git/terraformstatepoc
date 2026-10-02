@@ -1,0 +1,85 @@
+{
+  // Same logic as the built-ins "Secure transfer to storage accounts should be enabled" (404c3081) and
+  // "Storage accounts should have the specified minimum TLS version" (fe83a0eb), combined and set to Deny.
+  // Matches supportsHttpsTrafficOnly: true and minimumTlsVersion: TLS1_2 in modules/storage.bicep and
+  // https_traffic_only_enabled / min_tls_version in terraform/modules/storage.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-secure-transfer",
+  "properties": {
+    "displayName": "Storage accounts must require HTTPS and a minimum TLS version",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies storage accounts that allow unencrypted (HTTP) traffic or whose minimum TLS version is not in the allowed list.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedMinimumTlsVersions": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed minimum TLS versions",
+          "description": "Values of minimumTlsVersion that are accepted."
+        },
+        "defaultValue": [
+          "TLS1_2",
+          "TLS1_3"
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "value": "[requestContext().apiVersion]",
+                    "less": "2019-04-01"
+                  },
+                  {
+                    "field": "Microsoft.Storage/storageAccounts/supportsHttpsTrafficOnly",
+                    "exists": "false"
+                  }
+                ]
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/supportsHttpsTrafficOnly",
+                "equals": "false"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/minimumTlsVersion",
+                "exists": "false"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/minimumTlsVersion",
+                "notIn": "[parameters('allowedMinimumTlsVersions')]"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

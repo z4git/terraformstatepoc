@@ -1,0 +1,23 @@
+version: 2
+
+# Every `uses:` in this repo is pinned to a commit SHA, which is what a mutable tag like @v4 cannot
+# give you: the code that runs is fixed even if the tag is moved. The cost is that pins go stale, so
+# Dependabot owns them. It rewrites both the SHA and the trailing "# vX.Y.Z" comment, and its pull
+# requests go through the same review as any other change.
+#
+# The github-actions ecosystem with directory "/" covers .github/workflows/ and the composite actions
+# under .github/actions/. Add a terraform entry here if you also want provider and module bumps
+# (docs/terraform-best-practices.md, "Pin everything").
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One pull request for all action bumps instead of one per action.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci

@@ -1,0 +1,56 @@
+{
+  // Resource group counterpart of tfstate-required-tags-resources (resource groups are only evaluated in
+  // mode "All"). main.bicep tags the state resource group with the same set, one reference per tag.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-required-tags-resource-groups",
+  "properties": {
+    "displayName": "Resource groups must carry a required tag",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies resource groups that are missing the required tag.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Tags"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "tagName": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Required tag name",
+          "description": "Name of the tag that must be present (the value is not checked). One reference of this policy covers one tag; see tfstate-required-tags-resources."
+        }
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Resources/subscriptions/resourceGroups"
+          },
+          {
+            // Literal tag name only; see tfstate-required-tags-resources for why.
+            "field": "[concat('tags[', parameters('tagName'), ']')]",
+            "exists": "false"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

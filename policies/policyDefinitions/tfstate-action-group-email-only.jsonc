@@ -1,0 +1,120 @@
+{
+  // terraform/modules/action-group only creates email receivers with the common alert schema. Any other
+  // receiver type (webhook, logic app, function, automation runbook, event hub, ITSM, SMS, voice, push,
+  // ARM role) would send alert payloads, which include the identity and IP that touched the state, to a
+  // destination outside the reviewed configuration.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-action-group-email-only",
+  "properties": {
+    "displayName": "Action groups must only notify by email using the common alert schema",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies action groups that define any receiver other than email receivers, and email receivers that do not use the common alert schema.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Monitoring"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Insights/actionGroups"
+          },
+          {
+            "anyOf": [
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/emailReceivers[*]",
+                  "where": {
+                    "field": "Microsoft.Insights/actionGroups/emailReceivers[*].useCommonAlertSchema",
+                    "notEquals": "true"
+                  }
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/webhookReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/smsReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/voiceReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/azureAppPushReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/itsmReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/automationRunbookReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/logicAppReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/azureFunctionReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/armRoleReceivers[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Insights/actionGroups/eventHubReceivers[*]"
+                },
+                "greater": 0
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  // Same logic as the built-in "Allowed locations" (e56962a6), set to Deny. Everything in infrastructure/
+  // is deployed to the "location" in infrastructure/parameterfiles/tfstate-infrastructure.json; action
+  // groups are "global" and are accepted like the built-in does. Mode "Indexed": only resource types with
+  // a location are evaluated. Resource groups are covered by tfstate-allowed-locations-resource-groups.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-allowed-locations-resources",
+  "properties": {
+    "displayName": "Resources must be deployed to an allowed location",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "description": "Denies resources whose location is not in the allowed list. Resources with location global are accepted.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "General"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedLocations": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed locations",
+          "description": "Azure regions that resources may be deployed to.",
+          "strongType": "location"
+        },
+        "defaultValue": [
+          "westeurope"
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "location",
+            "notIn": "[parameters('allowedLocations')]"
+          },
+          {
+            "field": "location",
+            "notEquals": "global"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  // Same logic as the built-in "Storage accounts should restrict network access" (34c877ad), set to Deny.
+  // Matches networkAcls.defaultAction in modules/storage.bicep and network_rules.default_action in
+  // terraform/modules/storage, both driven by networkDefaultAction in
+  // infrastructure/parameterfiles/tfstate-infrastructure.json.
+  //
+  // While that parameter is "Allow" (GitHub-hosted runners have no stable egress IP, see
+  // docs/tfstate-infrastructure.md "State storage network access") the assignment sets this policy's
+  // effect to Audit; otherwise the next tfstate-infrastructure-deploy run would be denied. Flip the
+  // assignment parameter back to Deny in the same pull request that sets networkDefaultAction to "Deny".
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-network-default-deny",
+  "properties": {
+    "displayName": "Storage accounts must deny network access by default",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies storage accounts whose firewall default action is not Deny, so only the configured IP rules, virtual network rules and trusted Azure services can reach the account.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "field": "Microsoft.Storage/storageAccounts/networkAcls.defaultAction",
+            "notEquals": "Deny"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

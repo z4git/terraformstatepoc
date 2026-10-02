@@ -1,0 +1,10 @@
+{
+  "location": "westeurope",
+  "applicationName": "alz",
+  "environmentName": "poc",
+  "environmentNumber": 1,
+  "networkDefaultAction": "Allow",
+  "notificationEmails": [
+    "platform-team@your-domain.com"
+  ]
+}

@@ -1,0 +1,25 @@
+// Any request to the Terraform state containers made by an identified caller other than the plan or apply principal.
+// Deliberately NOT allowed: the local (act) principal and denied attempts, so both raise the alert.
+// Requests without an identity (no RequesterObjectId and no RequesterUpn, e.g. anonymous, SAS or account key)
+// are ignored.
+let stateAccount = "${storage_account_name}";
+let stateContainers = dynamic(${state_containers});
+let allowedPrincipals = dynamic(${allowed_principal_ids});
+StorageBlobLogs
+| where AccountName =~ stateAccount
+// ObjectKey is /<account>/<container>[/<blob>]
+| extend Container = tostring(split(ObjectKey, "/")[2])
+| where Container in (stateContainers)
+| where isnotempty(RequesterObjectId) or isnotempty(RequesterUpn)
+| where tolower(RequesterObjectId) !in (allowedPrincipals)
+| extend CallerIp = tostring(split(CallerIpAddress, ":")[0])
+| summarize
+    Requests = count(),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    Operations = make_set(OperationName, 20),
+    Blobs = make_set(ObjectKey, 20),
+    StatusCodes = make_set(StatusCode, 10),
+    CallerIps = make_set(CallerIp, 10),
+    UserAgents = make_set(UserAgentHeader, 5)
+    by RequesterObjectId, RequesterUpn, AuthenticationType

@@ -1,0 +1,49 @@
+{
+  // Enterprise Policy as Code (EPAC) settings for this repository.
+  // Docs: https://azure.github.io/enterprise-azure-policy-as-code/settings-global-setting-file/
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/global-settings-schema.json",
+
+  // Identifies the Policy resources this repository owns; EPAC writes it into metadata.pacOwnerId of
+  // everything it deploys. Never change it after the first deployment: EPAC would stop recognising
+  // its own resources and, with strategy "full", plan to delete and recreate them.
+  "pacOwnerId": "4a0096bf-becd-4be6-bd2f-8224471c8f6c",
+
+  // EPAC usage telemetry works by creating an empty Microsoft.Resources/deployments resource named
+  // pid-<guid> in the subscription on every run. The read-only plan identity cannot do that, and the
+  // deploy identity should not leave side effects outside the plan, so it is switched off.
+  "telemetryOptOut": true,
+
+  // One EPAC environment: the subscription that holds the Terraform state infrastructure.
+  // __AZURE_TENANT_ID__ and __AZURE_SUBSCRIPTION_ID__ are placeholders. The policies-plan and
+  // policies-deploy workflows (.github/actions/epac-definitions) replace them with the AZURE_TENANT_ID
+  // and AZURE_SUBSCRIPTION_ID repository variables at run time, so no tenant or subscription ID is
+  // committed. Running EPAC by hand: see policies/README.md, "Running locally".
+  "pacEnvironments": [
+    {
+      "pacSelector": "tfstate-subscription",
+      "cloud": "AzureCloud",
+      "tenantId": "__AZURE_TENANT_ID__",
+      "deploymentRootScope": "/subscriptions/__AZURE_SUBSCRIPTION_ID__",
+      // Pins the Az context to the target subscription instead of the first one the identity can see.
+      "defaultContext": "__AZURE_SUBSCRIPTION_ID__",
+      "desiredState": {
+        // "full": this repository is the only source of Policy resources at the subscription and its
+        // resource groups. EPAC deletes definitions, assignments and exemptions that are not defined here
+        // and that carry no pacOwnerId (portal- or CLI-created), while leaving resources owned by another
+        // EPAC repository alone. The pull request plan lists every deletion before it is merged.
+        // Use "ownedOnly" while adopting a subscription that still has policy resources you want to keep.
+        "strategy": "full",
+        // Defender for Cloud assigns "Microsoft cloud security benchmark" and per-plan policies by itself;
+        // both are kept so enabling Defender does not fight with this repository.
+        "keepDfcSecurityAssignments": true,
+        "keepDfcPlanAssignments": true,
+        "doNotDisableDeprecatedPolicies": false
+      },
+      // Required by the schema even though every policy here uses Deny (no DeployIfNotExists or Modify,
+      // so no managed identity is ever created). Matches "location" in
+      // infrastructure/parameterfiles/tfstate-infrastructure.json.
+      "managedIdentityLocation": "westeurope",
+      "skipResourceValidationForExemptions": false
+    }
+  ]
+}

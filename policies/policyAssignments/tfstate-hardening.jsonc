@@ -1,0 +1,89 @@
+{
+  // Assigns the hardening baseline (policySetDefinitions/tfstate-infrastructure-hardening.jsonc) to the
+  // subscription. Every effect is listed explicitly so the enforced posture is reviewable in one place;
+  // the policy set defaults are Deny for all of them.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-assignment-schema.json",
+  "nodeName": "/tfstate/hardening",
+  "definitionEntry": {
+    "policySetName": "tfstate-infrastructure-hardening",
+    "displayName": "Terraform state infrastructure hardening baseline"
+  },
+  "assignment": {
+    // At most 24 characters.
+    "name": "tfstate-hardening",
+    "displayName": "Terraform state infrastructure: hardening baseline",
+    "description": "Deny-by-default configuration baseline for the resource types the Terraform state infrastructure uses. Managed by policies/ in the repository; do not edit in the portal."
+  },
+  "metadata": {
+    "category": "Security"
+  },
+  "enforcementMode": "Default",
+  "parameters": {
+    "storageSecureTransferEffect": "Deny",
+    "allowedMinimumTlsVersions": [
+      "TLS1_2",
+      "TLS1_3"
+    ],
+    "storageNoSharedKeyEffect": "Deny",
+    "storageNoPublicBlobAccessEffect": "Deny",
+    "storageNoCrossTenantReplicationEffect": "Deny",
+    "storageEntraIdDefaultsEffect": "Deny",
+    // Audit, not Deny, while networkDefaultAction in infrastructure/parameterfiles/tfstate-infrastructure.json
+    // is "Allow" (GitHub-hosted runners have no stable egress IP; docs/tfstate-infrastructure.md "State storage
+    // network access"). With Deny the next tfstate-infrastructure-deploy run would be rejected. Set this to
+    // "Deny" in the same pull request that switches networkDefaultAction to "Deny".
+    "storageNetworkDefaultDenyEffect": "Audit",
+    "storageKindAndSkuEffect": "Deny",
+    "allowedStorageSkus": [
+      "Standard_GZRS",
+      "Standard_RAGZRS"
+    ],
+    "storageBlobDataProtectionEffect": "Deny",
+    // Matches softDeleteRetentionDays (Bicep) and soft_delete_retention_days (Terraform).
+    "minimumSoftDeleteRetentionDays": 90,
+    "logAnalyticsRetentionEffect": "Deny",
+    // Matches the log_analytics_retention_in_days default.
+    "minimumLogAnalyticsRetentionInDays": 30,
+    "actionGroupEmailOnlyEffect": "Deny",
+    "alertRuleEnabledEffect": "Deny",
+    "diagnosticSettingLogAnalyticsOnlyEffect": "Deny",
+    "backupVaultSoftDeleteEffect": "Deny",
+    "roleAssignmentAllowedRolesEffect": "Deny",
+    "allowedRoleDefinitionIds": [
+      "ba92f5b4-2d11-453d-a403-e96b0029c9fe", // Storage Blob Data Contributor (storage.bicep: apply and local identities)
+      "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1", // Storage Blob Data Reader (storage.bicep: plan identity)
+      "17d1049b-9a84-46fb-8f53-869881c3d3ab", // Storage Account Contributor (storage.bicep: firewall rule handling)
+      "f58310d9-a9f6-439a-9e8d-f62e7b41a168", // Role Based Access Control Administrator (storage.bicep: conditional, apply identity)
+      "e5e2a7ff-d759-4cd2-bb51-3152d37e2eb1", // Storage Account Backup Contributor (terraform/modules/backup-vault)
+      "acdd72a7-3385-48ef-bd42-f606fba81ae7", // Reader (create-service-principals.sh: plan identity)
+      "8e3af657-a8ff-443c-a75c-2fe8c4bcb635", // Owner (create-service-principals.sh: apply identity)
+      "b24988ac-6180-42a0-ab88-20f7382dd24c", // Contributor (create-service-principals.sh: apply identity alternative)
+      "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"  // User Access Administrator (create-service-principals.sh: apply identity alternative)
+      // The custom "Terraform Plan What-If Operator" role (infrastructure/rbac/terraform-plan-whatif-role.json)
+      // gets a tenant-specific GUID when it is created. Add it here before (re)running
+      // infrastructure/scripts/create-service-principals.sh, or its assignment is denied:
+      //   az role definition list --name "Terraform Plan What-If Operator" --query "[0].name" -o tsv
+    ],
+    // One effect for all five tags; the tag names themselves are fixed per reference in the policy set,
+    // matching locals.tags in infrastructure/bicep/main.bicep and infrastructure/terraform/main.tf.
+    "requiredTagsResourcesEffect": "Deny",
+    "requiredTagsResourceGroupsEffect": "Deny",
+    "allowedLocationsResourcesEffect": "Deny",
+    "allowedLocationsResourceGroupsEffect": "Deny",
+    // "location" in infrastructure/parameterfiles/tfstate-infrastructure.json. Action groups are "global" and pass.
+    "allowedLocations": [
+      "westeurope"
+    ]
+  },
+  "nonComplianceMessages": [
+    {
+      "message": "Denied by the Terraform state infrastructure hardening baseline (policies/ in the repository). The policy display name says which setting is wrong; policies/README.md lists the required configuration."
+    }
+  ],
+  // __AZURE_SUBSCRIPTION_ID__ is replaced by the workflows (see global-settings.jsonc).
+  "scope": {
+    "tfstate-subscription": [
+      "/subscriptions/__AZURE_SUBSCRIPTION_ID__"
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+// Any request to the Terraform state containers that did not authenticate with Entra ID: an account
+// key, a SAS token, or anonymous. Section 6 signal 2 of docs/terraform-best-practices.md.
+//
+// This is the companion to tfstate-unexpected-access.kql.tftpl, which can only judge callers it can
+// identify -- it drops rows with no RequesterObjectId and no RequesterUpn, which is exactly the shape
+// of a key, SAS or anonymous request. Between the two, every request to the containers is covered:
+// identified callers outside the allow-list raise that alert, unidentified ones raise this.
+//
+// shared_access_key_enabled = false, so these requests are rejected and arrive here as failures. That
+// is still worth paging on: a hit means either the key path was re-enabled (the Azure Policy layer
+// denies it, so that would itself be an incident) or something is probing the account with one. The
+// denial is not surfaced anywhere else, so without this query a key-based attempt is invisible.
+//
+// Deliberately not filtered: StatusCode. Failed attempts are the expected case here, so filtering to
+// successes would silence the signal entirely.
+let stateAccount = "${storage_account_name}";
+let stateContainers = dynamic(${state_containers});
+StorageBlobLogs
+| where AccountName =~ stateAccount
+// ObjectKey is /<account>/<container>[/<blob>]
+| extend Container = tostring(split(ObjectKey, "/")[2])
+| where Container in (stateContainers)
+// !~ rather than != so a casing change in the platform's value cannot silently disable the alert.
+| where AuthenticationType !~ "OAuth"
+| extend CallerIp = tostring(split(CallerIpAddress, ":")[0])
+| summarize
+    Requests = count(),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    Operations = make_set(OperationName, 20),
+    Blobs = make_set(ObjectKey, 20),
+    StatusCodes = make_set(StatusCode, 10),
+    CallerIps = make_set(CallerIp, 10),
+    UserAgents = make_set(UserAgentHeader, 5),
+    Requesters = make_set(RequesterObjectId, 10)
+    by AuthenticationType

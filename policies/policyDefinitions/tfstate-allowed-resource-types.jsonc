@@ -1,0 +1,125 @@
+{
+  // The one allow-list policy: every resource type not created by infrastructure/ (Bicep and Terraform)
+  // is denied. Mode "All" so that child resources (blob services, containers, backup policies and
+  // instances), extension resources (role assignments, locks, diagnostic settings), resource groups and
+  // deployments are evaluated as well; the built-in "Allowed resource types" uses mode "Indexed" and
+  // would ignore all of those.
+  //
+  // The default value of allowedResourceTypes is derived from infrastructure/. Keep it in sync when a
+  // new resource type is added there: the Bicep deploy or Terraform apply is denied otherwise.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-allowed-resource-types",
+  "properties": {
+    "displayName": "Only the resource types used by the Terraform state infrastructure are allowed",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies the creation or update of any resource whose type is not in the allow-list. The default list is exactly the set of resource types that infrastructure/bicep and infrastructure/terraform deploy, plus the deployment and policy resource types the pipelines themselves need. The subscription resource itself is not evaluated.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "General"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedResourceTypes": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed resource types",
+          "description": "Resource types (Microsoft.Provider/type, case-insensitive) that may be created or updated. Anything else is denied.",
+          "strongType": "resourceTypes"
+        },
+        "defaultValue": [
+          // infrastructure/bicep/main.bicep: subscription-scope deployment, resource group and the nested module deployment.
+          "Microsoft.Resources/deployments",
+          "Microsoft.Resources/subscriptions/resourceGroups",
+          // infrastructure/bicep/modules/storage.bicep and infrastructure/terraform/modules/storage: state storage account.
+          "Microsoft.Storage/storageAccounts",
+          "Microsoft.Storage/storageAccounts/blobServices",
+          "Microsoft.Storage/storageAccounts/blobServices/containers",
+          // The other three services of the same account: no queue, table or share is used, but each service
+          // resource exists and terraform/modules/storage puts a diagnostic setting on it (main.tf, the
+          // for_each over blob, queue, table and file).
+          "Microsoft.Storage/storageAccounts/queueServices",
+          "Microsoft.Storage/storageAccounts/tableServices",
+          "Microsoft.Storage/storageAccounts/fileServices",
+          // storage.bicep: Storage Blob Data / Storage Account Contributor / RBAC Administrator role assignments and the CanNotDelete lock.
+          // modules/backup-vault: Storage Account Backup Contributor for the vault identity.
+          "Microsoft.Authorization/roleAssignments",
+          "Microsoft.Authorization/locks",
+          // infrastructure/terraform/modules/log-analytics, action-group, scheduled-query-alert, storage (diagnostic settings).
+          // Azure fills the workspace with a table schema per built-in table and with the saved searches of the
+          // LogManagement solution; both are children of the workspace this repository creates.
+          "Microsoft.OperationalInsights/workspaces",
+          "Microsoft.OperationalInsights/workspaces/tables",
+          "Microsoft.OperationalInsights/workspaces/savedSearches",
+          "Microsoft.Insights/actionGroups",
+          "Microsoft.Insights/scheduledQueryRules",
+          "Microsoft.Insights/diagnosticSettings",
+          // infrastructure/terraform/modules/backup-vault.
+          "Microsoft.DataProtection/backupVaults",
+          "Microsoft.DataProtection/backupVaults/backupPolicies",
+          "Microsoft.DataProtection/backupVaults/backupInstances",
+          // policies/: what EPAC deploys, so the policies-deploy workflow can keep managing this subscription.
+          // The "versions" child types are written by Azure itself whenever a definition or set is updated.
+          "Microsoft.Authorization/policyDefinitions",
+          "Microsoft.Authorization/policyDefinitions/versions",
+          "Microsoft.Authorization/policySetDefinitions",
+          "Microsoft.Authorization/policySetDefinitions/versions",
+          "Microsoft.Authorization/policyAssignments",
+          "Microsoft.Authorization/policyExemptions",
+          // infrastructure/rbac/terraform-plan-whatif-role.json, created by scripts/create-service-principals.sh:
+          // the custom "Terraform Plan What-If Operator" role the plan identity needs.
+          "Microsoft.Authorization/roleDefinitions",
+          // Types nothing in this repository deploys, which Azure and the subscription's administrators write
+          // on their own. Denying them buys no protection and only produces deployment errors and noise:
+          // Advisor recommendations (read-only advice) and its opt-out configurations,
+          "Microsoft.Advisor/recommendations",
+          "Microsoft.Advisor/configurations",
+          // the role management policies carrying the PIM settings of each role, updated by Entra ID,
+          "Microsoft.Authorization/roleManagementPolicies",
+          // Cost Management budgets on the subscription,
+          "Microsoft.Consumption/budgets",
+          // and Defender for Cloud's own settings. They already exist in the subscription, so denying them
+          // removes nothing and only reports them as non-compliant; global-settings.jsonc likewise keeps
+          // Defender's policy assignments (keepDfcSecurityAssignments).
+          "Microsoft.Security/pricings",
+          "Microsoft.Security/settings",
+          "Microsoft.Security/policies"
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "value": "[field('type')]",
+            "exists": true
+          },
+          {
+            // Mode "All" also evaluates the subscription; it cannot be "created" and must not show as non-compliant.
+            "field": "type",
+            "notEquals": "Microsoft.Resources/subscriptions"
+          },
+          {
+            "field": "type",
+            "notIn": "[parameters('allowedResourceTypes')]"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

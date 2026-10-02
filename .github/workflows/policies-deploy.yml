@@ -1,0 +1,233 @@
+name: Azure Policy Deploy
+
+# Validates policies/ (Enterprise Policy as Code, EPAC), builds a fresh EPAC deployment plan against the
+# subscription and deploys it: policy definitions, policy sets, assignments and exemptions, then any role
+# assignments the plan needs (none for Deny-only policies).
+# For a preview only, use policies-plan.yml.
+#
+# Runs on push to main when anything under policies/ or this pipeline changes.
+# policies/README.md explains the layout and the policies.
+#
+# GitHub: signs in with OIDC federated credentials, as the same apply identity the
+# tfstate-infrastructure-deploy workflow uses (repository variables AZURE_APPLY_CLIENT_ID (falls back to
+# AZURE_CLIENT_ID), AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID; federated credential with entity type Branch = main).
+# Owner on the subscription covers what EPAC needs (Resource Policy Contributor for the policy resources and
+# Role Based Access Control Administrator for role assignments of managed identities).
+# Creating the identity: docs/service-principal-setup.md and infrastructure/scripts/create-service-principals.sh.
+#
+# Local (act): reuses your host `az login`. Run `az login` on the host first, then:
+#   act push -W .github/workflows/policies-deploy.yml \
+#     --container-options "-v $HOME/.azure:/tmp/azure-host:ro"
+# This deploys for real; run policies-plan.yml (act pull_request) for a preview.
+# AZURE_SUBSCRIPTION_ID is optional locally (defaults to the host's active subscription):
+#     --var AZURE_SUBSCRIPTION_ID=<subscription-id>
+# The container can only read a plaintext token cache (~/.azure/msal_token_cache.json). If the host
+# az stores tokens encrypted (macOS Keychain / Windows DPAPI), switch it once on the host:
+#   az config set core.encrypt_token_cache=false && az logout && az login
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - policies/**
+      - .github/workflows/policies-deploy.yml
+      - .github/actions/epac-setup/**
+      - .github/actions/epac-definitions/**
+
+permissions:
+  id-token: write
+  contents: read
+
+# Deploys run one at a time and are never cancelled. Not shared with policies-plan.yml:
+# GitHub cancels a pending run when a newer one joins the same group, so a queued PR plan could drop a deploy.
+concurrency:
+  group: policies-deploy
+  cancel-in-progress: false
+
+env:
+  DEFINITIONS_SOURCE: policies
+  # pacSelector in policies/global-settings.jsonc.
+  PAC_ENVIRONMENT: tfstate-subscription
+
+jobs:
+  policies-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Azure CLI and jq (act images do not include them)
+        if: ${{ env.ACT }}
+        run: |
+          SUDO=$(command -v sudo || true)
+          if ! command -v jq >/dev/null 2>&1; then
+            $SUDO apt-get update && $SUDO apt-get install -y jq
+          fi
+          if ! command -v az >/dev/null 2>&1; then
+            curl -sL https://aka.ms/InstallAzureCLIDeb | $SUDO bash
+          fi
+          az version
+
+      # Before the Azure login: installs pinned modules only, and fails early if a pin is broken.
+      - name: EPAC setup
+        uses: ./.github/actions/epac-setup
+
+      # enable-AzPSSession: EPAC runs on Az PowerShell, not on the Azure CLI.
+      - name: Azure login (GitHub OIDC)
+        if: ${{ !env.ACT }}
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_APPLY_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          enable-AzPSSession: true
+
+      - name: Azure login (local host az login)
+        if: ${{ env.ACT }}
+        run: |
+          if [ ! -d /tmp/azure-host ]; then
+            echo "::error::Host Azure config not mounted. Run act with --container-options \"-v \$HOME/.azure:/tmp/azure-host:ro\""
+            exit 1
+          fi
+          # Copy so token refreshes inside the container never modify the host cache.
+          if [ ! -f /tmp/azure-host/msal_token_cache.json ]; then
+            echo "::error::No plaintext az token cache found in the mounted host ~/.azure (tokens are likely in the macOS Keychain or Windows DPAPI). On the host run: az config set core.encrypt_token_cache=false && az logout && az login"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/azure"
+          cp -r /tmp/azure-host/. "$RUNNER_TEMP/azure/"
+          # Host binaries (e.g. a macOS bicep in bin/) cannot run in the Linux container; let az reinstall them.
+          rm -rf "$RUNNER_TEMP/azure/bin"
+
+          export AZURE_CONFIG_DIR="$RUNNER_TEMP/azure"
+          # Overrides a copied host config; the container has no libsecret keyring.
+          export AZURE_CORE_ENCRYPT_TOKEN_CACHE=false
+          echo "AZURE_CONFIG_DIR=$AZURE_CONFIG_DIR" >> "$GITHUB_ENV"
+          echo "AZURE_CORE_ENCRYPT_TOKEN_CACHE=false" >> "$GITHUB_ENV"
+
+          if ! az account get-access-token --query expiresOn -o tsv > /dev/null; then
+            echo "::error::Host az login token could not be used. On the host run: az logout && az login"
+            exit 1
+          fi
+
+      - name: Azure CLI select subscription
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          if [ -n "$AZURE_SUBSCRIPTION_ID" ]; then
+            az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          fi
+          az account show --query "{subscription:name, id:id, tenant:tenantId, user:user.name}" -o table
+          # Rendered into global-settings.jsonc (tenantId, deploymentRootScope) and the assignment scopes.
+          echo "EPAC_TENANT_ID=$(az account show --query tenantId -o tsv)" >> "$GITHUB_ENV"
+          echo "EPAC_SUBSCRIPTION_ID=$(az account show --query id -o tsv)" >> "$GITHUB_ENV"
+
+      # azure/login is skipped under act; hand the CLI's token (valid for about an hour) to Az PowerShell instead.
+      - name: Azure PowerShell login (local, from the Azure CLI session)
+        if: ${{ env.ACT }}
+        shell: pwsh
+        run: |
+          $account = az account show -o json | ConvertFrom-Json
+          $token = az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv
+          Connect-AzAccount -AccessToken $token -AccountId $account.user.name -TenantId $account.tenantId -SubscriptionId $account.id | Out-Null
+          Get-AzContext | Format-List Account, Tenant, Subscription
+
+      - name: EPAC render and validate definitions
+        id: definitions
+        uses: ./.github/actions/epac-definitions
+        with:
+          source: ${{ env.DEFINITIONS_SOURCE }}
+          tenant-id: ${{ env.EPAC_TENANT_ID }}
+          subscription-id: ${{ env.EPAC_SUBSCRIPTION_ID }}
+          pac-environment: ${{ env.PAC_ENVIRONMENT }}
+
+      # A fresh plan against the current state of Azure, not the one from the pull request: something may have
+      # changed in the subscription since it was built. Only what this plan lists is deployed below.
+      - name: EPAC build deployment plan
+        id: plan
+        shell: pwsh
+        env:
+          DEFINITIONS_FOLDER: ${{ steps.definitions.outputs.folder }}
+        run: |
+          $outputFolder = Join-Path $env:RUNNER_TEMP 'epac/Output'
+          Build-DeploymentPlans -DefinitionsRootFolder $env:DEFINITIONS_FOLDER -OutputFolder $outputFolder `
+            -PacEnvironmentSelector $env:PAC_ENVIRONMENT -DetailedOutput -InformationAction Continue
+
+          $planFile = Join-Path $outputFolder "plans-$($env:PAC_ENVIRONMENT)/policy-plan.json"
+          $rolesFile = Join-Path $outputFolder "plans-$($env:PAC_ENVIRONMENT)/roles-plan.json"
+          $policyChanges = Test-Path $planFile
+          $roleChanges = Test-Path $rolesFile
+          @(
+            "output-folder=$outputFolder"
+            "policy-changes=$($policyChanges.ToString().ToLower())"
+            "role-changes=$($roleChanges.ToString().ToLower())"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          $summary = [System.Collections.Generic.List[string]]::new()
+          $summary.Add("### Azure Policy deploy (``$($env:PAC_ENVIRONMENT)``)")
+          $summary.Add('')
+          if ($policyChanges) {
+            $plan = Get-Content -LiteralPath $planFile -Raw | ConvertFrom-Json -Depth 100 -AsHashtable
+            $summary.Add('| Resource | New | Update | Replace | Delete |')
+            $summary.Add('|---|---|---|---|---|')
+            $details = [System.Collections.Generic.List[string]]::new()
+            foreach ($section in 'policyDefinitions', 'policySetDefinitions', 'assignments', 'exemptions', 'enrollments') {
+              $changes = $plan[$section]
+              if ($null -eq $changes) { continue }
+              $cells = foreach ($kind in 'new', 'update', 'replace', 'delete') {
+                $items = $changes[$kind]
+                $count = if ($null -eq $items) { 0 } else { @($items.Keys).Count }
+                if ($count -gt 0) {
+                  foreach ($id in $items.Keys) { $details.Add("- **$kind** $section ``$(($id -split '/')[-1])``") }
+                }
+                $count
+              }
+              $summary.Add("| $section | $($cells -join ' | ') |")
+            }
+            $summary.Add('')
+            $summary.AddRange($details)
+            $summary.Add('')
+            $summary.Add("Plan created $($plan.createdOn); the full plan is attached as a workflow artifact.")
+          }
+          else {
+            $summary.Add('No changes: the deployed policy resources already match policies/.')
+          }
+          if ($roleChanges) {
+            $summary.Add('')
+            $summary.Add('Role assignment changes are deployed as well (roles-plan.json in the artifact).')
+          }
+          $summary -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      # Kept even when a deploy step below fails, so what was attempted is on record.
+      - name: Upload deployment plan
+        if: ${{ !env.ACT && steps.plan.outputs.policy-changes == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: epac-plan-${{ env.PAC_ENVIRONMENT }}-${{ github.run_number }}
+          path: ${{ steps.plan.outputs.output-folder }}
+          if-no-files-found: error
+          retention-days: 90
+
+      # Applies exactly the saved plan: definitions and policy sets first, then assignments and exemptions,
+      # deletions last. Needs Resource Policy Contributor (covered by Owner).
+      - name: EPAC deploy policy plan
+        if: ${{ steps.plan.outputs.policy-changes == 'true' }}
+        shell: pwsh
+        env:
+          DEFINITIONS_FOLDER: ${{ steps.definitions.outputs.folder }}
+          OUTPUT_FOLDER: ${{ steps.plan.outputs.output-folder }}
+        run: |
+          Deploy-PolicyPlan -DefinitionsRootFolder $env:DEFINITIONS_FOLDER -InputFolder $env:OUTPUT_FOLDER `
+            -PacEnvironmentSelector $env:PAC_ENVIRONMENT -InformationAction Continue
+
+      # Only when a DeployIfNotExists or Modify policy is added later; today no policy needs a managed identity.
+      - name: EPAC deploy roles plan
+        if: ${{ steps.plan.outputs.role-changes == 'true' }}
+        shell: pwsh
+        env:
+          DEFINITIONS_FOLDER: ${{ steps.definitions.outputs.folder }}
+          OUTPUT_FOLDER: ${{ steps.plan.outputs.output-folder }}
+        run: |
+          Deploy-RolesPlan -DefinitionsRootFolder $env:DEFINITIONS_FOLDER -InputFolder $env:OUTPUT_FOLDER `
+            -PacEnvironmentSelector $env:PAC_ENVIRONMENT -InformationAction Continue

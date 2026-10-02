@@ -1,0 +1,50 @@
+{
+  // The state access alert (terraform/modules/scheduled-query-alert) is the compensating control for the
+  // "Allow" network posture: while it runs, every unexpected identity that touches the state is reported.
+  // Disabling an alert rule, in the portal or by code, is therefore denied; delete it through Terraform
+  // and a reviewed pull request instead.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-alert-rule-enabled",
+  "properties": {
+    "displayName": "Log search alert rules must be enabled",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies scheduled query (log search) alert rules that are created or updated with enabled set to false.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Monitoring"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Insights/scheduledQueryRules"
+          },
+          {
+            "field": "Microsoft.Insights/scheduledQueryRules/enabled",
+            "notEquals": "true"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

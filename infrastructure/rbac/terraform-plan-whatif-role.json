@@ -1,0 +1,18 @@
+{
+  "//": "Custom role for the Terraform PLAN identity. Reader cannot call az deployment sub what-if, because that needs Microsoft.Resources/deployments actions Reader does not include. Replace <SUBSCRIPTION_ID> before creating the role (infrastructure/scripts/create-service-principals.sh does it for you). See docs/service-principal-setup.md.",
+  "Name": "Terraform Plan What-If Operator",
+  "IsCustom": true,
+  "Description": "Allows previewing subscription-scope ARM/Bicep deployments (what-if) without creating or changing any resource. Paired with Reader for the read permissions what-if validates against.",
+  "Actions": [
+    "Microsoft.Resources/deployments/read",
+    "Microsoft.Resources/deployments/whatIf/action",
+    "Microsoft.Resources/deployments/operations/read",
+    "Microsoft.Resources/deployments/operationstatuses/read"
+  ],
+  "NotActions": [],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": [
+    "/subscriptions/<SUBSCRIPTION_ID>"
+  ]
+}

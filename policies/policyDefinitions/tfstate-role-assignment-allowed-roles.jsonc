@@ -1,0 +1,75 @@
+{
+  // Role assignments are how state access is granted (docs/tfstate-infrastructure.md "Access control").
+  // Only the roles this repository assigns may be assigned in the subscription, at any scope:
+  //   modules/storage.bicep      Storage Blob Data Contributor, Storage Blob Data Reader,
+  //                              Storage Account Contributor, Role Based Access Control Administrator
+  //   modules/backup-vault       Storage Account Backup Contributor (vault identity)
+  //   scripts/create-service-principals.sh
+  //                              Reader (plan identity), Owner or Contributor + User Access Administrator
+  //                              (apply identity), and the custom "Terraform Plan What-If Operator" role
+  // The custom role's GUID is only known once the role exists in the tenant; add it in the assignment
+  // (policyAssignments/tfstate-hardening.jsonc) before running the service principal script.
+  // The same expression as the built-in "PIM only mode" policy is used to extract the role GUID.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-role-assignment-allowed-roles",
+  "properties": {
+    "displayName": "Role assignments may only grant the roles the Terraform state infrastructure uses",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies role assignments whose role definition is not in the allowed list of role definition GUIDs.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "General"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedRoleDefinitionIds": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed role definition GUIDs",
+          "description": "GUIDs (the last segment of the role definition ID, lower case) of the roles that may be assigned."
+        },
+        "defaultValue": [
+          "ba92f5b4-2d11-453d-a403-e96b0029c9fe", // Storage Blob Data Contributor
+          "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1", // Storage Blob Data Reader
+          "17d1049b-9a84-46fb-8f53-869881c3d3ab", // Storage Account Contributor
+          "f58310d9-a9f6-439a-9e8d-f62e7b41a168", // Role Based Access Control Administrator
+          "e5e2a7ff-d759-4cd2-bb51-3152d37e2eb1", // Storage Account Backup Contributor
+          "acdd72a7-3385-48ef-bd42-f606fba81ae7", // Reader
+          "8e3af657-a8ff-443c-a75c-2fe8c4bcb635", // Owner
+          "b24988ac-6180-42a0-ab88-20f7382dd24c", // Contributor
+          "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"  // User Access Administrator
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Authorization/roleAssignments"
+          },
+          {
+            "value": "[toLower(last(split(field('Microsoft.Authorization/roleAssignments/roleDefinitionId'), '/')))]",
+            "notIn": "[parameters('allowedRoleDefinitionIds')]"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+name: Act Hello World Test
+
+# Simple smoke-test workflow used to verify that both a local `act` install
+# and GitHub Actions itself can run workflows in this repo.
+#
+# Run locally with act:
+#   act -W .github/workflows/act-hello-world-test.yml
+on:
+  workflow_dispatch:
+
+jobs:
+  hello-world:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Say hello
+        run: echo "Hello, world!"
+
+      - name: Show environment info
+        run: |
+          echo "Runner OS: $RUNNER_OS"
+          echo "Workflow: $GITHUB_WORKFLOW"
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Ref: $GITHUB_REF"
+
+      - name: List repository files
+        run: ls -la

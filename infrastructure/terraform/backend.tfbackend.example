@@ -1,0 +1,4 @@
+resource_group_name  = "rg-alz-tfstate-dev-1"
+storage_account_name = "stalzdev10123456789abc"
+container_name       = "tfstate"
+key                  = "tfstate-infrastructure/dev-1.tfstate"

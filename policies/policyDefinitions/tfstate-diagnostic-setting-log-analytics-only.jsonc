@@ -1,0 +1,62 @@
+{
+  // Every diagnostic setting in terraform/modules/storage and terraform/modules/backup-vault sends to the
+  // Log Analytics workspace; that is where the state access alert reads from. A diagnostic setting that
+  // streams to a storage account, an event hub or a partner destination would copy the same audit trail
+  // (who read which state blob) somewhere the repository does not control.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-diagnostic-setting-log-analytics-only",
+  "properties": {
+    "displayName": "Diagnostic settings must send to a Log Analytics workspace and nowhere else",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies diagnostic settings without a Log Analytics workspace destination, and diagnostic settings that also target a storage account or an event hub.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Monitoring"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Insights/diagnosticSettings"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Insights/diagnosticSettings/workspaceId",
+                "exists": "false"
+              },
+              {
+                "field": "Microsoft.Insights/diagnosticSettings/storageAccountId",
+                "exists": "true"
+              },
+              {
+                "field": "Microsoft.Insights/diagnosticSettings/eventHubAuthorizationRuleId",
+                "exists": "true"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

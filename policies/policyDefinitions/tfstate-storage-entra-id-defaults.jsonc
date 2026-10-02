@@ -1,0 +1,58 @@
+{
+  // Matches defaultToOAuthAuthentication: true and allowedCopyScope: 'AAD' in modules/storage.bicep and
+  // default_to_oauth_authentication / allowed_copy_scope in terraform/modules/storage. Together with
+  // tfstate-storage-no-shared-key this makes Entra ID the only way to reach state data, and limits blob
+  // copy operations to sources in the same tenant.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-entra-id-defaults",
+  "properties": {
+    "displayName": "Storage accounts must default to Entra ID authorization and restrict copy scope to the tenant",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies storage accounts unless defaultToOAuthAuthentication is true (portal and tools use Entra ID by default) and allowedCopyScope is AAD (copy operations only from sources in the same Entra ID tenant).",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Storage/storageAccounts/defaultToOAuthAuthentication",
+                "notEquals": "true"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/allowedCopyScope",
+                "notEquals": "AAD"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

@@ -1,0 +1,159 @@
+name: Storage firewall runner IP
+description: >
+  Temporarily allows the runner's public IP through a storage account firewall (mode=add) and removes it
+  again (mode=remove). Requires a prior azure/login (or az login) with Storage Account Contributor on the account.
+
+# Usage (callers should use a concurrency group per storage account; rule updates are read-modify-write):
+#
+#   - id: firewall
+#     uses: ./.github/actions/storage-firewall-runner-ip
+#     with:
+#       mode: add
+#       storage-account-name: ${{ vars.TERRAFORM_STATE_STORAGE_ACCOUNT }}
+#       resource-group: ${{ vars.TERRAFORM_STATE_RESOURCE_GROUP }}
+#       container-name: tfstate
+#
+#   - run: terraform init && terraform plan
+#
+#   - if: always() && steps.firewall.outputs.added == 'true'
+#     uses: ./.github/actions/storage-firewall-runner-ip
+#     with:
+#       mode: remove
+#       storage-account-name: ${{ vars.TERRAFORM_STATE_STORAGE_ACCOUNT }}
+#       resource-group: ${{ vars.TERRAFORM_STATE_RESOURCE_GROUP }}
+#       ip-address: ${{ steps.firewall.outputs.ip-address }}
+
+inputs:
+  mode:
+    description: add or remove
+    required: true
+  storage-account-name:
+    description: Storage account name
+    required: true
+  resource-group:
+    description: Resource group of the storage account
+    required: true
+  ip-address:
+    description: IPv4 address to add/remove. Defaults to the runner's public IP (required for remove).
+    required: false
+    default: ""
+  container-name:
+    description: Container used to wait until blob access works after adding. Empty = fixed 30s wait.
+    required: false
+    default: ""
+  timeout-seconds:
+    description: Maximum seconds to wait for the rule to take effect
+    required: false
+    default: "120"
+
+outputs:
+  ip-address:
+    description: The IP address that was added or removed
+    value: ${{ steps.run.outputs.ip-address }}
+  added:
+    description: true if this run added the rule (so it should be removed afterwards)
+    value: ${{ steps.run.outputs.added }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        ACCOUNT: ${{ inputs.storage-account-name }}
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+        IP_ADDRESS: ${{ inputs.ip-address }}
+        CONTAINER: ${{ inputs.container-name }}
+        TIMEOUT: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+
+        if [ "$MODE" != "add" ] && [ "$MODE" != "remove" ]; then
+          echo "::error::mode must be add or remove (got '$MODE')."
+          exit 1
+        fi
+
+        if [ -z "$IP_ADDRESS" ]; then
+          if [ "$MODE" = "remove" ]; then
+            echo "::error::ip-address is required for mode=remove."
+            exit 1
+          fi
+          IP_ADDRESS=$(curl -fsS --max-time 10 https://api.ipify.org || curl -fsS --max-time 10 https://ifconfig.me/ip)
+        fi
+        if ! [[ "$IP_ADDRESS" =~ $ipv4 ]]; then
+          echo "::error::'$IP_ADDRESS' is not a single IPv4 address (IPv6 and CIDR ranges are not supported by this action)."
+          exit 1
+        fi
+        echo "ip-address=$IP_ADDRESS" >> "$GITHUB_OUTPUT"
+
+        rule_count() {
+          az storage account show --name "$ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+            --query "length(networkRuleSet.ipRules[?ipAddressOrRange=='$IP_ADDRESS'])" -o tsv
+        }
+
+        case "$MODE" in
+          add)
+            if [ "$(rule_count)" != "0" ]; then
+              echo "$IP_ADDRESS is already allowed; leaving the existing rule in place."
+              echo "added=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Adding $IP_ADDRESS to $ACCOUNT firewall."
+            az storage account network-rule add --account-name "$ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+              --ip-address "$IP_ADDRESS" -o none
+            echo "added=true" >> "$GITHUB_OUTPUT"
+
+            if [ -z "$CONTAINER" ]; then
+              sleep 30
+              exit 0
+            fi
+            deadline=$((SECONDS + TIMEOUT))
+            until az storage blob list --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+                    --auth-mode login --num-results 1 -o none 2>/dev/null; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                # Control-plane roles (Owner, Contributor, Storage Account Contributor) do not grant blob data
+                # access, so adding the firewall rule can succeed while this probe still fails. Show the real
+                # error and the facts needed to tell a firewall problem from a missing role assignment.
+                echo "::group::Diagnostics"
+                echo "--- blob list error ---"
+                az storage blob list --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+                  --auth-mode login --num-results 1 -o none || true
+                echo "--- signed-in identity (client ID for a service principal) ---"
+                caller=$(az account show --query user.name -o tsv 2>/dev/null || true)
+                echo "${caller:-unknown}"
+                caller_object_id=$(az ad sp show --id "$caller" --query id -o tsv 2>/dev/null || true)
+                echo "service principal object ID: ${caller_object_id:-could not resolve (no directory read permission?)}"
+                echo "This object ID is what TERRAFORM_APPLY_PRINCIPAL_ID / TERRAFORM_PLAN_PRINCIPAL_ID must contain"
+                echo "for Bicep to grant it a Storage Blob Data role."
+                echo "--- firewall rules on $ACCOUNT ---"
+                az storage account show --name "$ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+                  --query "networkRuleSet.{defaultAction:defaultAction, ipRules:ipRules[].ipAddressOrRange}" -o json || true
+                echo "(expected to include $IP_ADDRESS)"
+                echo "--- role assignments on the account and its containers ---"
+                account_id=$(az storage account show --name "$ACCOUNT" --resource-group "$RESOURCE_GROUP" --query id -o tsv 2>/dev/null || true)
+                if [ -n "$account_id" ]; then
+                  az role assignment list --scope "$account_id" --include-inherited \
+                    --query "[].{principalId:principalId, role:roleDefinitionName, scope:scope}" -o table || true
+                  az role assignment list --scope "$account_id/blobServices/default/containers/$CONTAINER" \
+                    --query "[].{principalId:principalId, role:roleDefinitionName}" -o table || true
+                fi
+                echo "::endgroup::"
+                echo "::error::Blob access still denied after ${TIMEOUT}s. The firewall rule was added, so this is most likely a missing Storage Blob Data role for the signed-in principal (control-plane roles such as Owner do not grant blob data access), or TERRAFORM_APPLY_PRINCIPAL_ID / TERRAFORM_PLAN_PRINCIPAL_ID not holding that principal's service principal object ID. See docs/service-principal-setup.md section 11."
+                exit 1
+              fi
+              sleep 10
+            done
+            echo "Blob access confirmed."
+            ;;
+          remove)
+            echo "Removing $IP_ADDRESS from $ACCOUNT firewall."
+            az storage account network-rule remove --account-name "$ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+              --ip-address "$IP_ADDRESS" -o none
+            ;;
+          *)
+            echo "::error::mode must be add or remove (got '$MODE')."
+            exit 1
+            ;;
+        esac

@@ -1,0 +1,49 @@
+{
+  // terraform/modules/backup-vault leaves the vault's soft delete at the Azure default (On). Turning it Off
+  // would let a deleted backup instance and its restore points disappear immediately, which defeats the
+  // reason the vault exists (docs/terraform-best-practices.md "Backup and recovery").
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-backup-vault-soft-delete",
+  "properties": {
+    "displayName": "Backup vaults must keep soft delete enabled",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies backup vaults (Microsoft.DataProtection) whose soft delete state is set to Off. On and AlwaysOn are accepted.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Backup"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.DataProtection/backupVaults"
+          },
+          {
+            "field": "Microsoft.DataProtection/backupVaults/securitySettings.softDeleteSettings.state",
+            "equals": "Off"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

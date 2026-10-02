@@ -1,0 +1,61 @@
+{
+  // Same logic as the built-in "Storage accounts should prevent shared key access" (8c6a50c6), set to Deny.
+  // Shared keys are the number one exfiltration path for Terraform state (docs/terraform-best-practices.md);
+  // with allowSharedKeyAccess: false every data-plane call is Entra ID authenticated and auditable.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-no-shared-key",
+  "properties": {
+    "displayName": "Storage accounts must disable shared key access",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies storage accounts that allow shared key (account key) authorization, or that do not set allowSharedKeyAccess explicitly to false.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Storage/storageAccounts/allowSharedKeyAccess",
+                "exists": "false"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/allowSharedKeyAccess",
+                "equals": ""
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/allowSharedKeyAccess",
+                "equals": "true"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

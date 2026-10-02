@@ -1,0 +1,54 @@
+{
+  // Same logic as the built-in "Storage account public access should be disallowed" (4fa4b6c0) without its
+  // Azure Red Hat OpenShift exception, set to Deny. Matches allowBlobPublicAccess: false in
+  // modules/storage.bicep and allow_nested_items_to_be_public = false in terraform/modules/storage.
+  // This is the only place anonymous access can be denied by policy: Microsoft.Storage registers no
+  // aliases for storageAccounts/blobServices/containers, so a container's publicAccess cannot be read in
+  // a policy rule. With the account setting false, Azure rejects any container that asks for it anyway.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-no-public-blob-access",
+  "properties": {
+    "displayName": "Storage accounts must disallow anonymous public blob access",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies storage accounts unless allowBlobPublicAccess is explicitly false, so no container or blob can ever be made anonymously readable.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "not": {
+              "field": "Microsoft.Storage/storageAccounts/allowBlobPublicAccess",
+              "equals": "false"
+            }
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

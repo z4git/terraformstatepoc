@@ -1,0 +1,71 @@
+{
+  // Matches kind: 'StorageV2' and the default skuName 'Standard_GZRS' in modules/storage.bicep and
+  // account_kind / account_replication_type in terraform/modules/storage. Geo-zone-redundant storage is
+  // what keeps the state readable through a zone or region outage (docs/terraform-best-practices.md).
+  // Add "Standard_ZRS" to allowedSkus for a region without GZRS.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-kind-and-sku",
+  "properties": {
+    "displayName": "Storage accounts must be StorageV2 with an allowed (zone- and geo-redundant) SKU",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies storage accounts that are not general-purpose v2 (kind StorageV2) or whose SKU is not in the allowed list.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "allowedSkus": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Allowed storage account SKUs",
+          "description": "Values of sku.name that are accepted."
+        },
+        "defaultValue": [
+          "Standard_GZRS",
+          "Standard_RAGZRS"
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "kind",
+                "notEquals": "StorageV2"
+              },
+              {
+                "not": {
+                  "field": "Microsoft.Storage/storageAccounts/sku.name",
+                  "in": "[parameters('allowedSkus')]"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

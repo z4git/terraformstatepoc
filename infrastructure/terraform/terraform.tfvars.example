@@ -1,0 +1,12 @@
+subscription_id    = "00000000-0000-0000-0000-000000000000"
+location           = "westeurope"
+application_name   = "alz"
+environment_name   = "dev"
+environment_number = 1
+unique_identifier  = "0123456789abc"
+
+# Must match networkDefaultAction in infrastructure/parameterfiles/tfstate-infrastructure.json,
+# or the next run flips the storage account's firewall back and forth.
+network_default_action = "Allow"
+
+notification_emails = ["platform-team@example.com"]

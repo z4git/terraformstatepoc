@@ -1,0 +1,87 @@
+{
+  // The blob service settings that make an accidental "terraform destroy" or a corrupted state recoverable
+  // (docs/terraform-best-practices.md "Versioning + soft delete + PITR"). Evaluated on the
+  // Microsoft.Storage/storageAccounts/blobServices resource, which both modules/storage.bicep (blobService)
+  // and terraform/modules/storage (blob_properties) write. Default retention matches
+  // softDeleteRetentionDays / soft_delete_retention_days (90).
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-blob-data-protection",
+  "properties": {
+    "displayName": "Storage blob services must enable versioning, change feed, soft delete and point-in-time restore",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies blob service configurations that disable blob versioning, change feed, blob or container soft delete (or set their retention below the minimum), or point-in-time restore.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "minimumSoftDeleteRetentionDays": {
+        "type": "Integer",
+        "metadata": {
+          "displayName": "Minimum soft delete retention (days)",
+          "description": "Minimum number of days that deleted blobs and containers must be retained."
+        },
+        "defaultValue": 90
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts/blobServices"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Storage/storageAccounts/blobServices/isVersioningEnabled",
+                "notEquals": "true"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/blobServices/changeFeed.enabled",
+                "notEquals": "true"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/blobServices/deleteRetentionPolicy.enabled",
+                "notEquals": "true"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/blobServices/deleteRetentionPolicy.days",
+                "less": "[parameters('minimumSoftDeleteRetentionDays')]"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/blobServices/containerDeleteRetentionPolicy.enabled",
+                "notEquals": "true"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/blobServices/containerDeleteRetentionPolicy.days",
+                "less": "[parameters('minimumSoftDeleteRetentionDays')]"
+              },
+              {
+                "field": "Microsoft.Storage/storageAccounts/blobServices/restorePolicy.enabled",
+                "notEquals": "true"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

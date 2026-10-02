@@ -1,0 +1,26 @@
+export PATH=/usr/local/share/npm-global/bin:$PATH
+
+# history persisted to the /commandhistory volume
+export HISTFILE=/commandhistory/.zsh_history
+HISTSIZE=100000
+SAVEHIST=100000
+setopt SHARE_HISTORY INC_APPEND_HISTORY HIST_IGNORE_DUPS HIST_IGNORE_SPACE
+
+autoload -Uz compinit && compinit -d "${HOME}/.zcompdump"
+zstyle ':completion:*' menu select
+
+autoload -Uz vcs_info
+zstyle ':vcs_info:git:*' formats ' (%b)'
+precmd() { vcs_info }
+setopt PROMPT_SUBST
+PROMPT='%F{cyan}%~%f%F{yellow}${vcs_info_msg_0_}%f %# '
+
+bindkey -e
+# zle only exists on a real terminal; guard so `zsh -ic ...` in scripts stays quiet.
+if [[ -t 1 ]]; then
+    [ -f /usr/share/doc/fzf/examples/key-bindings.zsh ] && source /usr/share/doc/fzf/examples/key-bindings.zsh
+    [ -f /usr/share/doc/fzf/examples/completion.zsh ] && source /usr/share/doc/fzf/examples/completion.zsh
+fi
+
+alias ll='ls -alh'
+alias gs='git status'

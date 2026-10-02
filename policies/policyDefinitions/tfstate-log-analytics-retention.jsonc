@@ -1,0 +1,57 @@
+{
+  // Matches retention_in_days in terraform/modules/log-analytics (log_analytics_retention_in_days, 30-730,
+  // default 30). The workspace holds the storage audit logs that the state access alert evaluates, so a
+  // shorter retention would shorten the forensic window.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-log-analytics-retention",
+  "properties": {
+    "displayName": "Log Analytics workspaces must retain data for a minimum number of days",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies Log Analytics workspaces whose interactive retention (retentionInDays) is below the minimum.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Monitoring"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "minimumRetentionInDays": {
+        "type": "Integer",
+        "metadata": {
+          "displayName": "Minimum retention (days)",
+          "description": "Minimum value of retentionInDays."
+        },
+        "defaultValue": 30
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.OperationalInsights/workspaces"
+          },
+          {
+            "field": "Microsoft.OperationalInsights/workspaces/retentionInDays",
+            "less": "[parameters('minimumRetentionInDays')]"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  // Same logic as the built-in "Storage accounts should prevent cross tenant object replication" (92a89a79),
+  // set to Deny. Matches allowCrossTenantReplication: false in modules/storage.bicep and
+  // cross_tenant_replication_enabled = false in terraform/modules/storage.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-storage-no-cross-tenant-replication",
+  "properties": {
+    "displayName": "Storage accounts must not allow cross-tenant object replication",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Denies storage accounts unless allowCrossTenantReplication is explicitly false, so state blobs cannot be replicated to a storage account in another Entra ID tenant.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Storage"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "field": "Microsoft.Storage/storageAccounts/allowCrossTenantReplication",
+            "notEquals": "false"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

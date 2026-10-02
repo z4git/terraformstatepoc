@@ -1,0 +1,360 @@
+name: Terraform State Infrastructure Plan
+
+# Scans infrastructure/ with Checkov, then previews infrastructure/bicep/main.bicep (Bicep What-if)
+# and infrastructure/terraform (Terraform plan).
+# Changes nothing except temporarily adding the runner IP to the state storage firewall.
+# Changes are applied by tfstate-infrastructure-deploy.yml when the pull request is merged to main.
+#
+# Runs on pull requests that change anything under infrastructure/.
+# Input values (location, applicationName, environmentName, environmentNumber, notificationEmails) are read from
+# infrastructure/parameterfiles/tfstate-infrastructure.json.
+#
+# GitHub: signs in with OIDC federated credentials, as the read-only plan identity. Set repository variables
+#   AZURE_PLAN_CLIENT_ID (falls back to AZURE_CLIENT_ID), AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+# and add a federated credential on the app registration for this repo with entity type Pull request
+# (subject repo:<owner>/<repo>:pull_request, or repo:<owner>@<owner-id>/<repo>@<repo-id>:pull_request when the
+# repository issues immutable-ID subject claims). Pull requests from forks get no OIDC token and cannot run this.
+# Creating the identity: docs/service-principal-setup.md and infrastructure/scripts/create-service-principals.sh.
+# What-if runs with --validation-level ProviderNoRbac, so ARM only checks read permissions on the resources in
+# the template (Reader on the subscription). The what-if call itself still needs access to
+# Microsoft.Resources/deployments/* at subscription scope (for example a custom role with that action), which
+# Reader does not include. The identity also needs Storage Account Contributor on the state storage account
+# (firewall rule) and Storage Blob Data Reader on the tfstate container (plan).
+#
+# Optional repository variables (same as tfstate-infrastructure-deploy.yml, so What-if previews the real deployment):
+#   TERRAFORM_APPLY_PRINCIPAL_ID, TERRAFORM_PLAN_PRINCIPAL_ID, TERRAFORM_LOCAL_PRINCIPAL_ID,
+#   TERRAFORM_STATE_ALLOWED_IPS, TERRAFORM_STATE_LOCAL_ALLOWED_IPS
+#
+# Local (act): reuses your host `az login`. Run `az login` on the host first, then:
+#   act pull_request -W .github/workflows/tfstate-infrastructure-plan.yml \
+#     --container-options "-v $HOME/.azure:/tmp/azure-host:ro"
+# AZURE_SUBSCRIPTION_ID is optional locally (defaults to the host's active subscription):
+#     --var AZURE_SUBSCRIPTION_ID=<subscription-id>
+# The container can only read a plaintext token cache (~/.azure/msal_token_cache.json). If the host
+# az stores tokens encrypted (macOS Keychain / Windows DPAPI), switch it once on the host:
+#   az config set core.encrypt_token_cache=false && az logout && az login
+
+on:
+  pull_request:
+    paths:
+      - infrastructure/**
+      - .github/workflows/tfstate-infrastructure-plan.yml
+
+permissions:
+  id-token: write
+  contents: read
+
+# One plan per pull request; a new push to the pull request cancels its running plan
+# (the firewall cleanup step still runs, it uses always()).
+concurrency:
+  group: tfstate-infrastructure-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TEMPLATE_FILE: infrastructure/bicep/main.bicep
+  TERRAFORM_DIR: infrastructure/terraform
+  PARAMETER_FILE: infrastructure/parameterfiles/tfstate-infrastructure.json
+
+jobs:
+  # Fails fast on formatting and syntax before anything reaches Azure: no credentials, no OIDC login,
+  # and unlike the plan below it still runs when the state storage account does not exist yet.
+  terraform-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Terraform setup
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        # -recursive covers modules/; -diff prints what is misformatted instead of only failing.
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform validate
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        # -backend=false: validate needs the provider schemas, not the state, so this needs no Azure
+        # credentials and does not touch the state blob.
+        run: |
+          terraform init -input=false -backend=false
+          terraform validate
+
+  tfstate-infrastructure-plan:
+    needs: terraform-validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Azure CLI and jq (act images do not include them)
+        if: ${{ env.ACT }}
+        run: |
+          SUDO=$(command -v sudo || true)
+          if ! command -v jq >/dev/null 2>&1; then
+            $SUDO apt-get update && $SUDO apt-get install -y jq
+          fi
+          if ! command -v az >/dev/null 2>&1; then
+            curl -sL https://aka.ms/InstallAzureCLIDeb | $SUDO bash
+          fi
+          az version
+
+      # Before the Azure login: policy findings should fail the pull request without touching Azure.
+      - name: Checkov scan
+        uses: ./.github/actions/checkov-scan
+        with:
+          directory: infrastructure
+
+      - name: jq read parameter file
+        run: |
+          for key in location applicationName environmentName environmentNumber notificationEmails; do
+            if ! jq -e --arg key "$key" 'has($key)' "$PARAMETER_FILE" > /dev/null; then
+              echo "::error::$PARAMETER_FILE is missing '$key'."
+              exit 1
+            fi
+          done
+          if ! jq -e '.notificationEmails | type == "array" and all(.[]; type == "string")' "$PARAMETER_FILE" > /dev/null; then
+            echo "::error::notificationEmails in $PARAMETER_FILE must be an array of email address strings."
+            exit 1
+          fi
+          # Validated in "Bicep prepare deployment parameters"; the email addresses by the Terraform variable.
+          {
+            echo "INPUT_LOCATION=$(jq -r '.location' "$PARAMETER_FILE")"
+            echo "INPUT_APPLICATION_NAME=$(jq -r '.applicationName' "$PARAMETER_FILE")"
+            echo "INPUT_ENVIRONMENT_NAME=$(jq -r '.environmentName' "$PARAMETER_FILE")"
+            echo "INPUT_ENVIRONMENT_NUMBER=$(jq -r '.environmentNumber' "$PARAMETER_FILE")"
+            echo "NOTIFICATION_EMAILS=$(jq -c '.notificationEmails' "$PARAMETER_FILE")"
+            echo "INPUT_NETWORK_DEFAULT_ACTION=$(jq -r '.networkDefaultAction // "Deny"' "$PARAMETER_FILE")"
+          } >> "$GITHUB_ENV"
+
+      - name: Azure login (GitHub OIDC)
+        if: ${{ !env.ACT }}
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_PLAN_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Azure login (local host az login)
+        if: ${{ env.ACT }}
+        run: |
+          if [ ! -d /tmp/azure-host ]; then
+            echo "::error::Host Azure config not mounted. Run act with --container-options \"-v \$HOME/.azure:/tmp/azure-host:ro\""
+            exit 1
+          fi
+          # Copy so token refreshes inside the container never modify the host cache.
+          if [ ! -f /tmp/azure-host/msal_token_cache.json ]; then
+            echo "::error::No plaintext az token cache found in the mounted host ~/.azure (tokens are likely in the macOS Keychain or Windows DPAPI). On the host run: az config set core.encrypt_token_cache=false && az logout && az login"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/azure"
+          cp -r /tmp/azure-host/. "$RUNNER_TEMP/azure/"
+          # Host binaries (e.g. a macOS bicep in bin/) cannot run in the Linux container; let az reinstall them.
+          rm -rf "$RUNNER_TEMP/azure/bin"
+
+          export AZURE_CONFIG_DIR="$RUNNER_TEMP/azure"
+          # Overrides a copied host config; the container has no libsecret keyring.
+          export AZURE_CORE_ENCRYPT_TOKEN_CACHE=false
+          echo "AZURE_CONFIG_DIR=$AZURE_CONFIG_DIR" >> "$GITHUB_ENV"
+          echo "AZURE_CORE_ENCRYPT_TOKEN_CACHE=false" >> "$GITHUB_ENV"
+
+          if ! az account get-access-token --query expiresOn -o tsv > /dev/null; then
+            echo "::error::Host az login token could not be used. On the host run: az logout && az login"
+            exit 1
+          fi
+
+      - name: Azure CLI select subscription
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          if [ -n "$AZURE_SUBSCRIPTION_ID" ]; then
+            az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          fi
+          az account show --query "{subscription:name, id:id, tenant:tenantId, user:user.name}" -o table
+          # Used by the azurerm provider and backend (they authenticate through the az CLI login).
+          echo "ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)" >> "$GITHUB_ENV"
+
+      - name: Bicep build and lint
+        run: |
+          az bicep install
+          az bicep build --file "$TEMPLATE_FILE" --stdout > /dev/null
+          az bicep lint --file "$TEMPLATE_FILE"
+
+      - name: Bicep prepare deployment parameters
+        env:
+          APPLY_PRINCIPAL_ID: ${{ vars.TERRAFORM_APPLY_PRINCIPAL_ID }}
+          PLAN_PRINCIPAL_ID: ${{ vars.TERRAFORM_PLAN_PRINCIPAL_ID }}
+          LOCAL_PRINCIPAL_ID: ${{ vars.TERRAFORM_LOCAL_PRINCIPAL_ID }}
+          ALLOWED_IPS: ${{ vars.TERRAFORM_STATE_ALLOWED_IPS }}
+          LOCAL_ALLOWED_IPS: ${{ vars.TERRAFORM_STATE_LOCAL_ALLOWED_IPS }}
+        run: |
+          if [ -n "$ACT" ] && [ -n "$LOCAL_ALLOWED_IPS" ]; then
+            ALLOWED_IPS="$ALLOWED_IPS,$LOCAL_ALLOWED_IPS"
+          fi
+
+          APPLICATION_NAME="${INPUT_APPLICATION_NAME,,}"
+          ENVIRONMENT_NAME="${INPUT_ENVIRONMENT_NAME,,}"
+          ENVIRONMENT_NUMBER="${INPUT_ENVIRONMENT_NUMBER,,}"
+          LOCATION="${INPUT_LOCATION,,}"
+
+          for value in "$APPLICATION_NAME" "$ENVIRONMENT_NAME" "$LOCATION"; do
+            if ! [[ "$value" =~ ^[a-z0-9]+$ ]]; then
+              echo "::error::location, applicationName and environmentName must be letters and digits only (got '$value')."
+              exit 1
+            fi
+          done
+          if ! [[ "$ENVIRONMENT_NUMBER" =~ ^[1-9]$ ]]; then
+            echo "::error::environmentNumber must be a single digit 1-9 (got '$ENVIRONMENT_NUMBER')."
+            exit 1
+          fi
+          if [ "$INPUT_NETWORK_DEFAULT_ACTION" != "Allow" ] && [ "$INPUT_NETWORK_DEFAULT_ACTION" != "Deny" ]; then
+            echo "::error::networkDefaultAction must be Allow or Deny (got '$INPUT_NETWORK_DEFAULT_ACTION')."
+            exit 1
+          fi
+          # Drives whether the runner IP has to be allowed through the firewall at all.
+          echo "NETWORK_DEFAULT_ACTION=$INPUT_NETWORK_DEFAULT_ACTION" >> "$GITHUB_ENV"
+
+          # Deterministic: identical inputs (any case) always hash to the same 13 lowercase hex chars.
+          UNIQUE_IDENTIFIER=$(printf '%s|%s|%s|%s' "$LOCATION" "$APPLICATION_NAME" "$ENVIRONMENT_NAME" "$ENVIRONMENT_NUMBER" | sha256sum | cut -c1-13)
+          echo "uniqueIdentifier: $UNIQUE_IDENTIFIER"
+          echo "Storage account: st${APPLICATION_NAME}${ENVIRONMENT_NAME}${ENVIRONMENT_NUMBER}${UNIQUE_IDENTIFIER}" >> "$GITHUB_STEP_SUMMARY"
+
+          params_file="$RUNNER_TEMP/tfstate.parameters.json"
+          jq -n \
+            --arg app "$APPLICATION_NAME" \
+            --arg env "$ENVIRONMENT_NAME" \
+            --argjson num "$ENVIRONMENT_NUMBER" \
+            --arg uid "$UNIQUE_IDENTIFIER" \
+            --arg apply "$APPLY_PRINCIPAL_ID" \
+            --arg plan "$PLAN_PRINCIPAL_ID" \
+            --arg local "$LOCAL_PRINCIPAL_ID" \
+            --arg ips "$ALLOWED_IPS" \
+            --arg netaction "$INPUT_NETWORK_DEFAULT_ACTION" \
+            '{
+              "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+              contentVersion: "1.0.0.0",
+              parameters: {
+                applicationName:           { value: $app },
+                environmentName:           { value: $env },
+                environmentNumber:         { value: $num },
+                uniqueIdentifier:          { value: $uid },
+                terraformApplyPrincipalId: { value: $apply },
+                terraformPlanPrincipalId:  { value: $plan },
+                terraformLocalPrincipalId: { value: $local },
+                networkDefaultAction:      { value: $netaction },
+                allowedIpAddresses:        { value: ($ips | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)) | unique) }
+              }
+            }' > "$params_file"
+          cat "$params_file"
+
+          echo "PARAMETERS_FILE=$params_file" >> "$GITHUB_ENV"
+          # Same Azure deployment name as tfstate-infrastructure-deploy.yml, so What-if compares against that deployment.
+          echo "DEPLOYMENT_NAME=tfstate-infrastructure-$APPLICATION_NAME-$ENVIRONMENT_NAME-$ENVIRONMENT_NUMBER" >> "$GITHUB_ENV"
+          echo "LOCATION=$LOCATION" >> "$GITHUB_ENV"
+          {
+            echo "APPLICATION_NAME=$APPLICATION_NAME"
+            echo "ENVIRONMENT_NAME=$ENVIRONMENT_NAME"
+            echo "ENVIRONMENT_NUMBER=$ENVIRONMENT_NUMBER"
+            echo "UNIQUE_IDENTIFIER=$UNIQUE_IDENTIFIER"
+            echo "STATE_RESOURCE_GROUP=rg-$APPLICATION_NAME-tfstate-$ENVIRONMENT_NAME-$ENVIRONMENT_NUMBER"
+            echo "STATE_STORAGE_ACCOUNT=st${APPLICATION_NAME}${ENVIRONMENT_NAME}${ENVIRONMENT_NUMBER}${UNIQUE_IDENTIFIER}"
+          } >> "$GITHUB_ENV"
+
+      - name: Bicep What-if
+        run: |
+          # ProviderNoRbac: full validation, but only read permissions are checked on each resource,
+          # so the pull request identity does not need the deploy identity's write roles.
+          az deployment sub what-if \
+            --validation-level ProviderNoRbac \
+            --name "$DEPLOYMENT_NAME" \
+            --location "$LOCATION" \
+            --template-file "$TEMPLATE_FILE" \
+            --parameters "@$PARAMETERS_FILE"
+
+      - name: Terraform setup
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+
+      - name: Azure CLI check state storage account exists
+        id: state
+        run: |
+          if az storage account show --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RESOURCE_GROUP" -o none 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$STATE_STORAGE_ACCOUNT does not exist yet; skipping terraform plan (the backend and imports need it)."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Skipped when networkDefaultAction is Allow: there is no IP allowlist to add to.
+      - name: Azure CLI allow runner IP through storage firewall
+        id: firewall
+        if: ${{ steps.state.outputs.exists == 'true' && env.NETWORK_DEFAULT_ACTION == 'Deny' }}
+        uses: ./.github/actions/storage-firewall-runner-ip
+        with:
+          mode: add
+          storage-account-name: ${{ env.STATE_STORAGE_ACCOUNT }}
+          resource-group: ${{ env.STATE_RESOURCE_GROUP }}
+          container-name: tfstate
+
+      - name: Terraform plan
+        if: ${{ steps.state.outputs.exists == 'true' }}
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        env:
+          # Excluded from the state access alert. TERRAFORM_LOCAL_PRINCIPAL_ID is not passed, so it still alerts.
+          APPLY_PRINCIPAL_ID: ${{ vars.TERRAFORM_APPLY_PRINCIPAL_ID }}
+          PLAN_PRINCIPAL_ID: ${{ vars.TERRAFORM_PLAN_PRINCIPAL_ID }}
+          FIREWALL_IP: ${{ steps.firewall.outputs.ip-address }}
+        run: |
+          # A 403 AuthorizationFailure from the backend is a NETWORK denial (an RBAC denial would be
+          # AuthorizationPermissionMismatch), even though the firewall step just probed blob access
+          # successfully. The two ways that happens are a concurrent job rewriting the rule set
+          # (network-rule add is read-modify-write) and this job egressing from a different IP than the
+          # one that was allowed. Show both on failure.
+          diagnose() {
+            echo "::group::State storage access diagnostics"
+            echo "--- firewall rules on $STATE_STORAGE_ACCOUNT ---"
+            az storage account show --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RESOURCE_GROUP" \
+              --query "networkRuleSet.{defaultAction:defaultAction, bypass:bypass, ipRules:ipRules[].ipAddressOrRange}" -o json || true
+            echo "rule this job added : ${FIREWALL_IP:-none}"
+            echo "runner public IP now: $(curl -fsS --max-time 10 https://api.ipify.org || echo unknown)"
+            echo "--- signed-in identity ---"
+            az account show --query "{client:user.name, type:user.type}" -o json || true
+            echo "If the rule is gone, another run rewrote the rule set; re-run this workflow."
+            echo "If the IP differs from the rule, this runner has more than one egress IP; use"
+            echo "TERRAFORM_STATE_ALLOWED_IPS with a stable egress (self-hosted runner or NAT gateway)."
+            echo "::endgroup::"
+          }
+          trap diagnose ERR
+
+          terraform init -input=false \
+            -backend-config="resource_group_name=$STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=tfstate-infrastructure/$ENVIRONMENT_NAME-$ENVIRONMENT_NUMBER.tfstate"
+
+          # -lock=false: plan is read-only here, so Storage Blob Data Reader is enough.
+          terraform plan -input=false -lock=false \
+            -var "subscription_id=$ARM_SUBSCRIPTION_ID" \
+            -var "location=$LOCATION" \
+            -var "application_name=$APPLICATION_NAME" \
+            -var "environment_name=$ENVIRONMENT_NAME" \
+            -var "environment_number=$ENVIRONMENT_NUMBER" \
+            -var "unique_identifier=$UNIQUE_IDENTIFIER" \
+            -var "notification_emails=$NOTIFICATION_EMAILS" \
+            -var "terraform_apply_principal_id=$APPLY_PRINCIPAL_ID" \
+            -var "terraform_plan_principal_id=$PLAN_PRINCIPAL_ID" \
+            -var "network_default_action=$NETWORK_DEFAULT_ACTION"
+
+      - name: Azure CLI remove runner IP from storage firewall
+        if: ${{ always() && steps.firewall.outputs.added == 'true' }}
+        uses: ./.github/actions/storage-firewall-runner-ip
+        with:
+          mode: remove
+          storage-account-name: ${{ env.STATE_STORAGE_ACCOUNT }}
+          resource-group: ${{ env.STATE_RESOURCE_GROUP }}
+          ip-address: ${{ steps.firewall.outputs.ip-address }}

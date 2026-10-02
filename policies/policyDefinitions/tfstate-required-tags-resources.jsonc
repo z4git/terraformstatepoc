@@ -1,0 +1,53 @@
+{
+  // One required tag name, checked on the tag set that main.bicep and terraform/main.tf put on every
+  // top-level resource (locals.tags); the initiative references this policy once per tag.
+  // Mode "Indexed" on purpose: only resource types that support tags are evaluated, so blob containers,
+  // role assignments, locks, diagnostic settings, backup policies and instances are not affected.
+  // Resource groups need mode "All" and are covered by tfstate-required-tags-resource-groups.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-definition-schema.json",
+  "name": "tfstate-required-tags-resources",
+  "properties": {
+    "displayName": "Resources must carry a required tag",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "description": "Denies taggable resources that are missing the required tag.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Tags"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the create or update request; Audit only reports; Disabled turns the policy off."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "tagName": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Required tag name",
+          "description": "Name of the tag that must be present (the value is not checked). Azure Policy cannot loop over a list of tag names, so one reference of this policy covers one tag; the initiative references it once per required tag."
+        }
+      }
+    },
+    "policyRule": {
+      "if": {
+        // The tag name has to be a literal in the accessor: 'field' rejects the runtime functions
+        // field() and current(), so a count over an array of tag names is not expressible. Only
+        // parameters() is resolved early enough, which is what the built-in tag policies use too.
+        "field": "[concat('tags[', parameters('tagName'), ']')]",
+        "exists": "false"
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

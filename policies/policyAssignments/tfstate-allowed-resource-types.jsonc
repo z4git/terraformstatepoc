@@ -1,0 +1,36 @@
+{
+  // Assigns the single allow-list policy (policyDefinitions/tfstate-allowed-resource-types.jsonc) to the
+  // subscription. The allow-list itself is the policy's default value; override "allowedResourceTypes"
+  // here only for a subscription-specific exception, and prefer changing the definition when infrastructure/
+  // gains a resource type.
+  "$schema": "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/main/Schemas/policy-assignment-schema.json",
+  "nodeName": "/tfstate/allowed-resource-types",
+  "definitionEntry": {
+    "policyName": "tfstate-allowed-resource-types",
+    "displayName": "Only the resource types used by the Terraform state infrastructure are allowed"
+  },
+  "assignment": {
+    // At most 24 characters.
+    "name": "tfstate-allowed-types",
+    "displayName": "Terraform state infrastructure: allowed resource types",
+    "description": "Denies every resource type that infrastructure/ (Bicep and Terraform) does not deploy. Managed by policies/ in the repository; do not edit in the portal."
+  },
+  "metadata": {
+    "category": "General"
+  },
+  "enforcementMode": "Default",
+  "parameters": {
+    "effect": "Deny"
+  },
+  "nonComplianceMessages": [
+    {
+      "message": "This resource type is not used by the Terraform state infrastructure and is denied in this subscription. Add it to policies/policyDefinitions/tfstate-allowed-resource-types.jsonc through a pull request if it is needed (see policies/README.md)."
+    }
+  ],
+  // __AZURE_SUBSCRIPTION_ID__ is replaced by the workflows (see global-settings.jsonc).
+  "scope": {
+    "tfstate-subscription": [
+      "/subscriptions/__AZURE_SUBSCRIPTION_ID__"
+    ]
+  }
+}

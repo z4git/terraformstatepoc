@@ -1,0 +1,222 @@
+name: EPAC render and validate definitions
+description: >
+  Copies the EPAC definitions folder to the runner temp directory, replaces the __AZURE_TENANT_ID__ and
+  __AZURE_SUBSCRIPTION_ID__ placeholders with the real IDs, and validates the result (JSON syntax, EPAC JSON
+  schemas, name lengths and cross-references) before EPAC touches Azure. Outputs the rendered folder path.
+
+# Usage (same call in policies-plan.yml and policies-deploy.yml):
+#
+#   - id: definitions
+#     uses: ./.github/actions/epac-definitions
+#     with:
+#       tenant-id: ${{ env.EPAC_TENANT_ID }}
+#       subscription-id: ${{ env.EPAC_SUBSCRIPTION_ID }}
+#
+# The placeholders keep tenant and subscription IDs out of the repository (they live in the AZURE_TENANT_ID
+# and AZURE_SUBSCRIPTION_ID repository variables, like for the tfstate-infrastructure workflows).
+
+inputs:
+  source:
+    description: EPAC definitions root folder in the repository (contains global-settings.jsonc).
+    required: false
+    default: policies
+  tenant-id:
+    description: Entra ID tenant ID that replaces __AZURE_TENANT_ID__.
+    required: true
+  subscription-id:
+    description: Subscription ID that replaces __AZURE_SUBSCRIPTION_ID__.
+    required: true
+  pac-environment:
+    description: pacSelector that must exist in global-settings.jsonc and in every assignment scope.
+    required: false
+    default: tfstate-subscription
+  epac-version:
+    description: EPAC release whose JSON schemas are used for validation (same pin as epac-setup).
+    required: false
+    default: 11.5.6
+
+outputs:
+  folder:
+    description: Absolute path of the rendered definitions folder to pass as -DefinitionsRootFolder.
+    value: ${{ steps.render.outputs.folder }}
+
+runs:
+  using: composite
+  steps:
+    - id: render
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+        TENANT_ID: ${{ inputs.tenant-id }}
+        SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+      run: |
+        set -euo pipefail
+        guid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        if ! [[ "$TENANT_ID" =~ $guid ]]; then
+          echo "::error::tenant-id must be a GUID (got '$TENANT_ID'). Set the AZURE_TENANT_ID repository variable."
+          exit 1
+        fi
+        if ! [[ "$SUBSCRIPTION_ID" =~ $guid ]]; then
+          echo "::error::subscription-id must be a GUID (got '$SUBSCRIPTION_ID'). Set the AZURE_SUBSCRIPTION_ID repository variable."
+          exit 1
+        fi
+        if [ ! -f "$SOURCE/global-settings.jsonc" ]; then
+          echo "::error::'$SOURCE/global-settings.jsonc' does not exist."
+          exit 1
+        fi
+
+        folder="$RUNNER_TEMP/epac/Definitions"
+        rm -rf "$folder"
+        mkdir -p "$(dirname "$folder")"
+        cp -r "$SOURCE" "$folder"
+
+        # Placeholders are plain text, so the replacement works in .jsonc comments and in JSON alike.
+        find "$folder" -type f \( -name '*.json' -o -name '*.jsonc' -o -name '*.csv' \) -print0 |
+          xargs -0 sed -i -e "s/__AZURE_TENANT_ID__/$TENANT_ID/g" -e "s/__AZURE_SUBSCRIPTION_ID__/$SUBSCRIPTION_ID/g"
+
+        if grep -rIl --include='*.json' --include='*.jsonc' --include='*.csv' '__AZURE_[A-Z_]*__' "$folder"; then
+          echo "::error::Unknown placeholder left in the files above; only __AZURE_TENANT_ID__ and __AZURE_SUBSCRIPTION_ID__ are replaced."
+          exit 1
+        fi
+        echo "Rendered $SOURCE to $folder for subscription $SUBSCRIPTION_ID."
+        echo "folder=$folder" >> "$GITHUB_OUTPUT"
+
+    - name: Validate definitions
+      shell: pwsh
+      env:
+        FOLDER: ${{ steps.render.outputs.folder }}
+        PAC_ENVIRONMENT: ${{ inputs.pac-environment }}
+        EPAC_VERSION: ${{ inputs.epac-version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $errors = [System.Collections.Generic.List[string]]::new()
+        $folder = $env:FOLDER
+
+        # Schemas from the EPAC release that matches the installed module, not from its main branch.
+        $schemaFolder = Join-Path $env:RUNNER_TEMP 'epac/schemas'
+        New-Item -ItemType Directory -Path $schemaFolder -Force | Out-Null
+        $schemaBase = "https://raw.githubusercontent.com/Azure/enterprise-azure-policy-as-code/v$($env:EPAC_VERSION)/Schemas"
+        $schemas = @{
+          'global-settings'      = 'global-settings-schema.json'
+          'policyDefinitions'    = 'policy-definition-schema.json'
+          'policySetDefinitions' = 'policy-set-definition-schema.json'
+          'policyAssignments'    = 'policy-assignment-schema.json'
+          'policyExemptions'     = 'policy-exemption-schema.json'
+        }
+        foreach ($kind in $schemas.Keys) {
+          Invoke-WebRequest -Uri "$schemaBase/$($schemas[$kind])" -OutFile (Join-Path $schemaFolder $schemas[$kind]) -MaximumRetryCount 3 -RetryIntervalSec 5
+        }
+
+        function Read-Definition([System.IO.FileInfo] $file) {
+          # PowerShell 7 accepts // comments (jsonc) and reports the offending line on a syntax error.
+          Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json -Depth 100 -AsHashtable
+        }
+
+        function Test-Definition([System.IO.FileInfo] $file, [string] $kind) {
+          try {
+            $object = Read-Definition $file
+          }
+          catch {
+            $errors.Add("$($file.FullName): invalid JSON. $($_.Exception.Message)")
+            return $null
+          }
+          # Test-Json does not accept comments: validate the parsed object re-serialised as plain JSON.
+          $json = $object | ConvertTo-Json -Depth 100
+          $schemaFile = Join-Path $schemaFolder $schemas[$kind]
+          $schemaErrors = $null
+          $valid = Test-Json -Json $json -SchemaFile $schemaFile -ErrorAction SilentlyContinue -ErrorVariable schemaErrors
+          if (-not $valid) {
+            $detail = ($schemaErrors | ForEach-Object { $_.Exception.Message }) -join '; '
+            $errors.Add("$($file.FullName): does not match $($schemas[$kind]). $detail")
+          }
+          return $object
+        }
+
+        $globalSettings = Test-Definition (Get-Item (Join-Path $folder 'global-settings.jsonc')) 'global-settings'
+        if ($globalSettings) {
+          $selectors = @($globalSettings.pacEnvironments | ForEach-Object { $_.pacSelector })
+          if ($selectors -notcontains $env:PAC_ENVIRONMENT) {
+            $errors.Add("global-settings.jsonc: pacEnvironments has no pacSelector '$($env:PAC_ENVIRONMENT)' (found: $($selectors -join ', ')).")
+          }
+        }
+
+        $definitionNames = @{}
+        $policySetNames = @{}
+        $files = @{}
+        foreach ($kind in 'policyDefinitions', 'policySetDefinitions', 'policyAssignments', 'policyExemptions') {
+          $path = Join-Path $folder $kind
+          $files[$kind] = @()
+          if (Test-Path $path) {
+            $files[$kind] = @(Get-ChildItem -Path $path -Recurse -File -Include '*.json', '*.jsonc')
+          }
+        }
+
+        foreach ($file in $files.policyDefinitions) {
+          $definition = Test-Definition $file 'policyDefinitions'
+          if (-not $definition) { continue }
+          if ($definitionNames.ContainsKey($definition.name)) {
+            $errors.Add("$($file.Name): policy definition name '$($definition.name)' is also used by $($definitionNames[$definition.name]).")
+          }
+          $definitionNames[$definition.name] = $file.Name
+          if ($definition.name.Length -gt 64) {
+            $errors.Add("$($file.Name): policy definition name '$($definition.name)' is longer than 64 characters.")
+          }
+        }
+
+        foreach ($file in $files.policySetDefinitions) {
+          $policySet = Test-Definition $file 'policySetDefinitions'
+          if (-not $policySet) { continue }
+          if ($policySetNames.ContainsKey($policySet.name)) {
+            $errors.Add("$($file.Name): policy set name '$($policySet.name)' is also used by $($policySetNames[$policySet.name]).")
+          }
+          $policySetNames[$policySet.name] = $file.Name
+          $referenceIds = @{}
+          foreach ($entry in $policySet.properties.policyDefinitions) {
+            if ($entry.policyDefinitionName -and -not $definitionNames.ContainsKey($entry.policyDefinitionName)) {
+              $errors.Add("$($file.Name): policyDefinitionName '$($entry.policyDefinitionName)' has no file in policyDefinitions/.")
+            }
+            if ($referenceIds.ContainsKey($entry.policyDefinitionReferenceId)) {
+              $errors.Add("$($file.Name): policyDefinitionReferenceId '$($entry.policyDefinitionReferenceId)' is used twice.")
+            }
+            $referenceIds[$entry.policyDefinitionReferenceId] = $true
+          }
+        }
+
+        foreach ($file in $files.policyAssignments) {
+          $assignment = Test-Definition $file 'policyAssignments'
+          if (-not $assignment) { continue }
+          # Only the single-node (no children) layout is validated here; EPAC checks the full tree.
+          $entry = $assignment.definitionEntry
+          if ($entry) {
+            if ($entry.policyName -and -not $definitionNames.ContainsKey($entry.policyName)) {
+              $errors.Add("$($file.Name): policyName '$($entry.policyName)' has no file in policyDefinitions/.")
+            }
+            if ($entry.policySetName -and -not $policySetNames.ContainsKey($entry.policySetName)) {
+              $errors.Add("$($file.Name): policySetName '$($entry.policySetName)' has no file in policySetDefinitions/.")
+            }
+          }
+          if ($assignment.assignment -and $assignment.assignment.name.Length -gt 24) {
+            $errors.Add("$($file.Name): assignment name '$($assignment.assignment.name)' is longer than 24 characters.")
+          }
+          if ($assignment.scope -and -not $assignment.scope.ContainsKey($env:PAC_ENVIRONMENT)) {
+            $errors.Add("$($file.Name): scope has no entry for pacSelector '$($env:PAC_ENVIRONMENT)'; the assignment would not be deployed.")
+          }
+        }
+
+        foreach ($file in $files.policyExemptions) {
+          Test-Definition $file 'policyExemptions' | Out-Null
+        }
+
+        $counts = "$($files.policyDefinitions.Count) policy definitions, $($files.policySetDefinitions.Count) policy sets, $($files.policyAssignments.Count) assignment files, $($files.policyExemptions.Count) exemption files"
+        @(
+          "### EPAC definitions (``$($env:PAC_ENVIRONMENT)``)"
+          ''
+          "$counts; $($errors.Count) validation error(s)."
+          ''
+        ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+        if ($errors.Count -gt 0) {
+          foreach ($e in $errors) { Write-Host "::error::$e" }
+          throw "$($errors.Count) validation error(s) in $folder."
+        }
+        Write-Host "Validated $counts."
